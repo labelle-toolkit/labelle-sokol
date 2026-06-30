@@ -26,5 +26,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libasound2-dev libgl1-mesa-dev libx11-dev \
             libxi-dev libxcursor-dev libsdl2-dev
+      - name: Install SDL2 (macOS)
+        if: runner.os == 'macOS'
+        # The desktop gamepad source (labelle-sdl-gamepad) links SDL2; input.zig
+        # links it on macOS too.
+        run: brew install sdl2
       - name: Build + test
         run: zig build test
