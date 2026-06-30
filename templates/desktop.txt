@@ -1,0 +1,122 @@
+const BackendGfxType = @import("backend_gfx");
+
+var g: AssembledGame = undefined;
+{{hooks_init_block}}
+{{allocator_decl}}
+{{module_vars}}
+
+// Screenshot capture request (labelle-cli#227). `screenshot_req` is
+// the active request (null when the env var is unset, or after the
+// shot fires). `screenshot_start_ns` is set on the first frame so the
+// `--after` delay is measured from "main-loop entry", matching the
+// raylib backend's semantics. Sokol drives frames via callbacks, so
+// the state has to be module-scope here (the raylib template uses a
+// local in `main()` for the same reason it can — it owns the loop).
+var screenshot_req: ?@import("labelle-engine").ScreenshotRequest = null;
+var screenshot_start_ns: i128 = 0;
+var screenshot_initialized: bool = false;
+const screen_w: u32 = {{width}};
+const screen_h: u32 = {{height}};
+const screen_title = "{{title}}";
+const target_fps: u32 = {{fps}};
+
+fn initInner() !void {
+{{allocator_local_decl}}{{preview_setup}}{{init_code}}}
+
+export fn init() callconv(.c) void {
+{{hidden_setup}}    window.initGfx();
+    g = AssembledGame.init({{allocator_expr}});
+    g.setHooks(&hooks);
+    g.setScreenHeight(@as(f32, @floatFromInt(screen_h)));
+    initInner() catch |err| {
+        std.debug.print("labelle: init failed: {any}\n", .{err});
+    };
+}
+
+{{gui_event_extern}}fn sokolEvent(ev: [*c]const @import("backend_input").Event) callconv(.c) void {
+    @import("backend_input").handleEvent(ev);
+{{gui_event_forward}}}
+
+export fn frame() callconv(.c) void {
+    if (!g.isRunning()) {
+        window.requestQuit();
+        return;
+    }
+    // Apply a pending fullscreen/windowed switch requested via
+    // `game.setFullscreen`/`toggleFullscreen`. The engine owns the desired
+    // flag; the backend owns the platform call. Gated on BOTH the backend
+    // exposing `setFullscreen` and the engine exposing the drain, so the
+    // template stays compatible with backends/engines that predate the API
+    // (the whole block folds away — older example projects still build).
+    if (comptime @hasDecl(window, "setFullscreen") and @hasDecl(@TypeOf(g), "takeFullscreenRequest")) {
+        if (g.takeFullscreenRequest()) |on| window.setFullscreen(on);
+    }
+    // Vsync: same engine-owned-flag / backend-applies split as fullscreen.
+    // Folds away on backends without `setVsync` or engines predating the API.
+    if (comptime @hasDecl(window, "setVsync") and @hasDecl(@TypeOf(g), "takeVsyncRequest")) {
+        if (g.takeVsyncRequest()) |on| window.setVsync(on);
+    }
+    BackendGfxType.setScreenSize(window.width(), window.height());
+    // Keep design coords fixed so screen-space NDC mapping uses the design resolution
+    // rather than the physical framebuffer size (which differs on HiDPI displays).
+    BackendGfxType.setDesignSize(@intCast(screen_w), @intCast(screen_h));
+    // Frame-rate-independent sim: derive dt from real frame time so render
+    // FPS (vsync / display refresh) can't drive game speed. Cap at 4 frames
+    // to prevent physics explosions after a stall/backgrounding. Mirrors
+    // mobile.txt — see Flying-Platform/flying-platform-labelle#504.
+    // @max(target_fps, 1) guards against a target_fps=0 (unlimited/vsync-only) config dividing by zero.
+    const dt: f32 = @min(@as(f32, @floatCast(window.frameDuration())), 4.0 / @as(f32, @floatFromInt(@max(target_fps, 1))));
+{{preview_heartbeat}}{{tick_code}}    g.tick(dt);
+{{preview_pre_render}}    const pass_action = window.beginFrame();
+    window.beginPass(pass_action);
+    g.render();
+    g.renderGizmos();
+    // Flush queued sokol-gl primitives (sprites, gizmos) into the
+    // active sg pass BEFORE the GUI renders, so imgui's draws are
+    // submitted on top instead of being hidden underneath the sgl
+    // flush that used to happen at endFrame. See labelle-imgui#4.
+    window.flushScene();
+{{gui_draw_code}}{{preview_readback}}    window.endFrame();
+{{preview_readback_post}}
+    // Fire the screenshot exactly once, after the configured delay
+    // (labelle-cli#227). First-frame lazy-init avoids a separate
+    // sokol init-callback hook just to seed the start-time. The
+    // `null` test on subsequent frames is one cmp+branch the
+    // optimizer keeps near-free; on regular runs the parse returns
+    // null at first-frame init and the branch falls through forever.
+    if (!screenshot_initialized) {
+        screenshot_req = @import("labelle-engine").requestedScreenshot();
+        screenshot_start_ns = @import("labelle-engine").nowNs();
+        screenshot_initialized = true;
+    }
+    if (screenshot_req) |req| {
+        const now_ns: i128 = @import("labelle-engine").nowNs();
+        const elapsed_sec: f32 = @as(f32, @floatFromInt(@as(i64, @intCast(now_ns - screenshot_start_ns)))) / 1_000_000_000.0;
+        if (elapsed_sec >= req.after_sec) {
+            window.takeScreenshot(req.path);
+            screenshot_req = null;
+            window.requestQuit();
+        }
+    }
+    // Clear one-shot pressed/released state AFTER scripts have consumed it.
+    // Calling newFrame at the top of frame() would race with sapp events
+    // dispatched between frame callbacks and drop isKeyPressed reports.
+    @import("backend_input").newFrame();
+}
+
+export fn cleanup() callconv(.c) void {
+{{preview_cleanup}}{{cleanup_code}}    g.deinit();
+    window.shutdownGfx();
+{{allocator_cleanup}}}
+
+pub fn main() void {
+    window.run(.{
+        .init_cb = &init,
+        .frame_cb = &frame,
+        .cleanup_cb = &cleanup,
+        .event_cb = &sokolEvent,
+        .w = screen_w,
+        .h = screen_h,
+        .title = screen_title,
+    });
+}

@@ -1,0 +1,32 @@
+    // `with_imgui` flips sokol_imgui.c compilation on. MUST match the
+    // imgui bridge's option set when the project includes imgui, or
+    // Zig caches two `sokol_clib` artifacts (and two `_sg` states) —
+    // see comment in `backends/sokol/build.zig` (labelle-assembler#140).
+    const backend_dep = b.dependency("labelle_sokol", .{ .target = target, .optimize = optimize, .with_imgui = {{with_imgui}}, .gamepad_enabled = {{gamepad_enabled}}, .gamepad_hidapi = {{gamepad_hidapi}} });
+    const backend_gfx = backend_dep.module("gfx");
+    const backend_input = backend_dep.module("input");
+    const backend_audio = backend_dep.module("audio");
+    const backend_window = backend_dep.module("window");
+    const sokol_clib = backend_dep.artifact("sokol_clib");
+
+    // Unify the app core onto the transitive `sdl_gamepad` desktop gamepad
+    // source — same diamond as `.backend_raylib` (see the note there). The
+    // sokol `input` module reaches `GamepadEvent` through `sdl_gamepad`
+    // (imported under the `labelle_core` underscore key) rather than a direct
+    // core import, so the override target is the sdl_gamepad module, not
+    // `input`. `if` guard: only desktop sokol wires sdl_gamepad in (Android/iOS
+    // use their own gamepad paths; wasm has none). See labelle-assembler#271.
+    if (backend_input.import_table.get("sdl_gamepad")) |sdl_gp_mod| {
+        overrideImport(sdl_gp_mod, "labelle_core", core_mod);
+    }
+
+    // Linux desktop core gamepad route (core#33 scope 2): there the sokol
+    // backend wires a DIRECT `labelle-core` import on `input` (reaching the
+    // udev/evdev gamepad source) instead of `sdl_gamepad`. Unify the app
+    // core onto it so gamepad state/event types match the engine's. `if`
+    // guard: the import only exists on Linux desktop builds — adding the
+    // override unconditionally would inject a dead import elsewhere (#258).
+    if (backend_input.import_table.get("labelle-core")) |_| {
+        overrideImport(backend_input, "labelle-core", core_mod);
+    }
+

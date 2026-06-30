@@ -1,0 +1,92 @@
+.{
+    .fingerprint = 0x312df839bf864b91,
+    .name = .labelle_sokol,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        // Shared windowless-SDL desktop gamepad source (core#28). In-tree
+        // sub-package shared with the raylib backend via a relative path — the
+        // toolkit's own-build.zig sub-package convention. On desktop the sokol
+        // input backend routes gamepad through it; Android keeps the shared
+        // android_gamepad source below.
+        .labelle_sdl_gamepad = .{
+            .url = "https://github.com/labelle-toolkit/labelle-sdl-gamepad/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "labelle_sdl_gamepad-0.1.0-zOpuDcSwAABZaICKS4AEVvghHnZSNDyls-wzdnYc6cLQ",
+        },
+        // Shared Android gamepad source (#310 Stage 4). In-tree sub-package
+        // shared with the bgfx backend: the per-device STATE machine
+        // (`android_gamepad_state.zig`, #250) as the `android_gamepad` module,
+        // plus the InputManager JNI DETECTION glue (`android_gamepad_jni.c`,
+        // #248) reached via `dep.path(...)` and compiled into `input` on
+        // Android (where the NDK sysroot is wired). Off Android nothing here is
+        // referenced.
+        .labelle_android_gamepad = .{
+            .url = "https://github.com/labelle-toolkit/labelle-android-gamepad/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "labelle_android_gamepad-0.1.0-aniuyr7OAADukHTeqRqavrEvsUDAutllmC2KJDek0Ox9",
+        },
+        // Gamepad event contract (GamepadEvent / GamepadDescription, core#18)
+        // unified onto the shared sdl_gamepad module — and, on desktop Linux
+        // (core#33), imported DIRECTLY by input.zig as `labelle-core` to reach
+        // the udev/evdev gamepad STATE source (gamepad_source.Source.update/
+        // isButtonDown/…, which landed in v1.16.0; v1.15.0 was detection-only).
+        .labelle_core = .{
+            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.16.1.tar.gz",
+            .hash = "labelle_core-1.16.1-OauRcDNUBAA0n4uPvKp3HETPvMZprHL_kRyUERdj4xqx",
+        },
+        .sokol = .{
+            // ⚠ LOCKSTEP: this commit MUST equal labelle-imgui's sokol
+            // pin (its top-level `.sokol` AND `bridges/sokol/build.zig.zon`)
+            // exactly — mismatched commits trigger duplicate-module errors
+            // across consumers that pull both labelle-imgui and
+            // labelle-assembler (see labelle-assembler#207). Both were
+            // 887b30f; this PR (labelle-assembler#250) bumped to ba7363f, now to 2114f00 (GLES3 ASTC ext fix, sokol-zig#3).
+            // labelle-imgui MUST bump to 2114f00 in the same change set.
+            //
+            // Pinned to the labelle-toolkit fork of sokol-zig. The fork adds,
+            // on top of upstream floooh/sokol-zig @ 8b1a651:
+            //   (a) the `with_sokol_imgui_no_app` build option, which defines
+            //       `SOKOL_IMGUI_NO_SOKOL_APP` when compiling sokol_imgui.c so
+            //       labelle-imgui's headless preview can drive simgui via
+            //       `simgui_new_frame(width/height/dpi_scale/...)`. The
+            //       assembler doesn't pass that option itself — pinning the
+            //       fork aligns the package hash with imgui's dependency tree.
+            //       Default false → backward compatible with upstream.
+            //   (b) Android gamepad event forwarding (branch
+            //       `feat/forward-android-gamepad-events`, labelle-assembler#250):
+            //       `sapp_android_register_gamepad_callback()` forwards the
+            //       gamepad KEY / AINPUT_SOURCE_JOYSTICK MOTION AInputEvents
+            //       that upstream sokol_app.h drops. Gated to SOKOL_ANDROID
+            //       with a no-op stub everywhere else, and a no-op when no
+            //       callback is registered — purely additive, so it is
+            //       backward compatible for imgui too.
+            //
+            // Bumping requires `zig fetch --save=sokol <url>`.
+            .url = "https://github.com/labelle-toolkit/sokol-zig/archive/2114f00976bf0b00bc1e1ced7a6d01d59f679e8c.tar.gz",
+            .hash = "sokol-0.1.0-pb1HKx2mNwBtmW1xhHMfc0uxkmcvjrVG_IUmSqTrwjjn",
+        },
+        // emsdk is needed at WASM build time so we can plumb the
+        // sysroot include path through to `stb_image_impl.c`. The
+        // assembler-generated `build.zig.zon` already declares an
+        // `emsdk` dep at the same version for the link step
+        // (`wasm_emsdk_sokol` template section); we mirror it here so
+        // the gfx module's C compile can resolve `<stdlib.h>` and the
+        // other emsdk system headers (labelle-cli#197).
+        .emsdk = .{
+            .url = "git+https://github.com/emscripten-core/emsdk#4.0.9",
+            .hash = "N-V-__8AAJl1DwBezhYo_VE6f53mPVm00R-Fk28NPW7P14EQ",
+            .lazy = true,
+        },
+        .labelle_audio = .{
+            .url = "https://github.com/labelle-toolkit/labelle-audio/archive/refs/tags/v0.4.2.tar.gz",
+            .hash = "labelle_audio-0.4.2-QQRmYPTbBABcweqfq5lBsZsOS6Z4EnQ0qDXdESuITDrz",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "backend.manifest.zon",
+        "build_fragments",
+        "templates",
+        "src",
+    },
+}

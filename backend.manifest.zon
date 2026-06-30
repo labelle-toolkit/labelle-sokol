@@ -1,0 +1,15 @@
+.{
+    // sokol backend manifest — pluggable-backends epic (#386). CALLBACK-style
+    // (sokol_app owns the run loop via init/frame callbacks), desktop splice.
+    // Byte-identical to the enum path (the splice supports .callback; verified
+    // vs a generated baseline). WASM/iOS/Android keep the enum path — the splice
+    // is desktop-only. Params with_imgui/gamepad_enabled/gamepad_hidapi forward
+    // to b.dependency (as the enum renderSection did); the backend_dep fragment
+    // carries the gamepad core-diamond overrides (sdl_gamepad + Linux udev route).
+    .dir_name = "sokol",
+    .dep_name = "labelle_sokol",
+    .loop_style = .callback,
+    .main_loop_template = "templates/desktop.txt",
+    .build_fragments = .{ .backend_dep = "build_fragments/backend_dep.txt", .link = "build_fragments/link.txt" },
+    .params = .{ .backend_dep = .{ "with_imgui", "gamepad_enabled", "gamepad_hidapi" }, .link = .{} },
+}

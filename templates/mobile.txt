@@ -1,0 +1,102 @@
+const BackendGfxType = @import("backend_gfx");
+
+{{module_vars}}var g: AssembledGame = undefined;
+{{hooks_init_block}}
+var gpa = std.heap.DebugAllocator(.{}).init;
+
+var frame_count: u32 = 0;
+
+const screen_w: u32 = {{width}};
+const screen_h: u32 = {{height}};
+const screen_title = "{{title}}";
+const target_fps: u32 = {{fps}};
+
+// {{platform_comment}}
+export fn init() callconv(.c) void {
+    window.initGfx();
+    const allocator = gpa.allocator();
+    g = AssembledGame.init(allocator);
+
+    g.setHooks(&hooks);
+    g.setScreenHeight(@as(f32, @floatFromInt(screen_h)));
+{{preview_setup}}{{init_code}}    // Initialize the Android gamepad subsystem: registers the forwarded-event
+    // callback and runs the JNI InputManager enumeration so pads already
+    // connected at launch are detected (labelle-engine#261). Comptime no-op on
+    // non-Android sokol targets (desktop/wasm), so this is safe everywhere.
+    @import("backend_input").initAndroidGamepad();
+}
+
+{{gui_event_extern}}fn sokolEvent(ev: [*c]const @import("backend_input").Event) callconv(.c) void {
+    @import("backend_input").handleEvent(ev);
+{{gui_event_forward}}}
+
+export fn frame() callconv(.c) void {
+    if (!g.isRunning()) {
+        window.requestQuit();
+        return;
+    }
+    frame_count +|= 1;
+
+    const actual_w = window.width();
+    const actual_h = window.height();
+    BackendGfxType.setScreenSize(actual_w, actual_h);
+    // Tell the gfx backend the design canvas size so screen-space sprites
+    // (background, UI) map design coords (0..screen_w, 0..screen_h) to the
+    // full physical screen NDC range. Must be called after setScreenSize.
+    BackendGfxType.setDesignSize(@intCast(screen_w), @intCast(screen_h));
+    g.setScreenHeight(@as(f32, @floatFromInt(screen_h)));
+    // On the first frame, scale camera zoom so the design height fills the physical
+    // screen height exactly. With high_dpi=true, actual_h is the framebuffer height.
+    // zoom = actual_h / design_h maps one design pixel to (actual_h/design_h) physical
+    // pixels, giving sharp high-DPI rendering without layout changes to game code.
+    if (frame_count == 1) {
+        const zoom = @as(f32, @floatFromInt(actual_h)) / @as(f32, @floatFromInt(screen_h));
+        g.getCamera().setZoom(zoom);
+    }
+    // Cap dt at 4 frames to prevent physics explosions after backgrounding.
+    // @max(target_fps, 1) guards against a target_fps=0 (unlimited/vsync-only) config dividing by zero.
+    const dt: f32 = @min(@as(f32, @floatCast(window.frameDuration())), 4.0 / @as(f32, @floatFromInt(@max(target_fps, 1))));
+{{preview_heartbeat}}{{tick_code}}    g.tick(dt);
+{{preview_pre_render}}    const pass_action = window.beginFrame();
+    window.beginPass(pass_action);
+    g.render();
+    g.renderGizmos();
+    // Flush queued sokol-gl primitives BEFORE the GUI renders so imgui
+    // draws are submitted on top of sprites in the same pass. Same shape
+    // as the desktop template — see labelle-imgui#4 / PR #80 for the
+    // overdraw bug this ordering fixes.
+    window.flushScene();
+{{gui_draw_code}}{{preview_readback}}    window.endFrame();
+{{preview_readback_post}}    // Clear edge-triggered key/button/touch state AFTER scripts had a chance
+    // to read it. See the matching comment in desktop.txt — same invariant.
+    @import("backend_input").newFrame();
+}
+
+export fn cleanup() callconv(.c) void {
+{{preview_cleanup}}    g.deinit();
+    // On iOS, don't shutdown sokol_gfx — sokol_app owns the Metal device and
+    // UIWindow lifecycle. On Android, shutdown is safe.
+    if (comptime @import("builtin").target.os.tag != .ios) {
+        window.shutdownGfx();
+    }
+    _ = gpa.deinit();
+}
+
+// {{entry_comment}}
+// sokol's C runtime provides the OS entry point (ANativeActivity_onCreate on
+// Android, main() on iOS) and calls sokol_main() to configure the app.
+// sokol_main must RETURN sapp_desc — it must NOT call sapp_run() itself.
+// Zig's own pub fn main() is not used for shared-library / UIKit targets.
+export fn sokol_main(argc: c_int, argv: [*][*:0]u8) window.Desc {
+    _ = argc;
+    _ = argv;
+{{immersive_entry}}    return window.makeDesc(.{
+        .init_cb = &init,
+        .frame_cb = &frame,
+        .cleanup_cb = &cleanup,
+        .event_cb = &sokolEvent,
+        .w = screen_w,
+        .h = screen_h,
+        .title = screen_title,
+    });
+}

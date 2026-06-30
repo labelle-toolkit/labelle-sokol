@@ -1,0 +1,27 @@
+    exe.root_module.linkLibrary(sokol_clib);
+
+    // IOSurface + CoreFoundation are needed for the macOS preview-mode
+    // IOSurface producer (labelle-assembler#121 + #125, labelle-
+    // engine#547). The engine references `IOSurfaceCreate`,
+    // `IOSurfaceLock`, `CFNumberCreate`, etc. via `@extern "c"` —
+    // these symbols live in IOSurface.framework + CoreFoundation
+    // .framework, and sokol's upstream linker line does not propagate
+    // them. Same on iOS (the framework path is identical). Linux /
+    // Windows / web have no macOS-specific symbols to resolve here,
+    // so the framework links are gated on the Darwin target tags.
+    switch (target.result.os.tag) {
+        .macos, .ios => {
+            exe.root_module.linkFramework("IOSurface", .{});
+            exe.root_module.linkFramework("CoreFoundation", .{});
+        },
+        // NOTE: labelle-core's Linux gamepad-detection source
+        // (gamepad_source/linux.zig, labelle-assembler#249) does NOT need a
+        // build-time libudev link. As of labelle-core#20 it loads libudev at
+        // RUNTIME via std.DynLib (dlopen of `libudev.so.1`) and degrades
+        // gracefully when the library is absent — so the generated build must
+        // not link `-ludev`, which would reintroduce a hard build/runtime
+        // dependency. Runtime device-access setup (input group / udev
+        // `uaccess` rule, Flatpak `--device=input`) is in docs/gamepad-linux.md.
+        else => {},
+    }
+
