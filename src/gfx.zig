@@ -16,6 +16,13 @@
 /// outside this backend should `@import` directly — every consumer
 /// goes through `b.dependency("labelle_sokol", ...).module("gfx")`,
 /// which still points at this file.
+// Contract-version tags (labelle-assembler#453 item 1). The assembler emits
+// directional `@compileError` version asserts in the generated game's main.zig
+// comparing these against labelle-core's `*_CONTRACT_VERSION` consts. v1 is the
+// initial revision of each contract.
+pub const targets_draw_contract: u32 = 1;
+pub const targets_loader_contract: u32 = 1;
+
 const types = @import("gfx/types.zig");
 const state = @import("gfx/state.zig");
 const draw = @import("gfx/draw.zig");

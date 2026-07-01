@@ -12,4 +12,33 @@
     .main_loop_template = "templates/desktop.txt",
     .build_fragments = .{ .backend_dep = "build_fragments/backend_dep.txt", .link = "build_fragments/link.txt" },
     .params = .{ .backend_dep = .{ "with_imgui", "gamepad_enabled", "gamepad_hidapi" }, .link = .{} },
+
+    // Canonical provider identity (#453). sokol is an official provider, so it
+    // lives under the reserved `labelle.` namespace. The enum tag `.sokol` is a
+    // shorthand for exactly this id — `validateProviderIdentity` drift-checks it.
+    .id = "labelle.sokol",
+
+    // Declared capabilities (#453) — what sokol ACTUALLY supports; the reference
+    // set other backends copy. sokol runs on desktop + all mobile/web targets
+    // (its sokol_app run-loop is the ONLY Android/iOS path today), ships the
+    // in-backend imgui adapter, provides gamepad polling, can take headless
+    // screenshots (the sole no-GUI-session screenshot path), and decodes OGG.
+    // `.surface_loss` is declared because sokol is the primary Android/iOS
+    // backend and sokol_app manages the GL context destroy/recreate lifecycle;
+    // dropping it would fail the android-derived `.surface_loss` requirement
+    // and break the dominant mobile build path.
+    // NOT declared: `.headless` — sokol always creates a window; the true
+    // no-window headless path is the separate `null` backend.
+    .capabilities = .{
+        .screenshots,
+        .compressed_textures,
+        .fonts,
+        .gamepad_polling,
+        .raw_gui_adapter,
+        .surface_loss,
+        .wasm,
+        .android,
+        .ios,
+        .audio_ogg,
+    },
 }

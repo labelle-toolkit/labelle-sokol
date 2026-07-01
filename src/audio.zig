@@ -35,6 +35,13 @@
 /// preserved verbatim: the engine/assembler call them by name (and the
 /// assembler's `writeAudioBackendWiring` calls `decodeAudio`/`uploadSound`/
 /// `unloadSound`/`DecodedAudio`/`Sound`).
+// Contract-version tags (labelle-assembler#453 item 1). The assembler emits
+// directional `@compileError` version asserts in the generated game's main.zig
+// comparing these against labelle-core's `*_CONTRACT_VERSION` consts. v1 is the
+// initial revision of each contract.
+pub const targets_audio_playback_contract: u32 = 1;
+pub const targets_audio_loader_contract: u32 = 1;
+
 const std = @import("std");
 const labelle_audio = @import("labelle-audio");
 const SokolSink = @import("audio/sink.zig");
