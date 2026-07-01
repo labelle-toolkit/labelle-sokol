@@ -1,4 +1,9 @@
 /// Sokol window backend — windowing lifecycle via sokol_app.
+// Contract-version tags (labelle-assembler#453 item 1). The assembler emits
+// directional `@compileError` version asserts in the generated game's main.zig
+// comparing these against labelle-core's `*_CONTRACT_VERSION` consts. v1 is the
+// initial revision of each contract.
+pub const targets_window_contract: u32 = 1;
 const std = @import("std");
 const builtin = @import("builtin");
 const sokol = @import("sokol");
