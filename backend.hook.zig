@@ -414,9 +414,16 @@ pub fn emLinkStep(b: *std.Build, options: EmLinkOptions) *std.Build.Step.Install
     if (options.optimize == .Debug) {
         emcc.addArgs(&.{ "-Og", "-sSAFE_HEAP=1", "-sSTACK_OVERFLOW_CHECK=1" });
     } else {
-        // Non-Debug: optimize. Disable assertions for the fastest/smallest builds,
-        // but KEEP them for ReleaseSafe (a safety build).
-        if (options.optimize != .ReleaseSafe) emcc.addArg("-sASSERTIONS=0");
+        // Non-Debug: optimize. Emscripten DEFAULTS assertions off (ASSERTIONS=0)
+        // in optimized (-O1+) builds, so keeping them for ReleaseSafe (a safety
+        // build) requires setting -sASSERTIONS=1 EXPLICITLY — merely omitting
+        // -sASSERTIONS=0 would still leave them off. ReleaseFast/ReleaseSmall
+        // disable them for the fastest/smallest builds.
+        if (options.optimize == .ReleaseSafe) {
+            emcc.addArg("-sASSERTIONS=1");
+        } else {
+            emcc.addArg("-sASSERTIONS=0");
+        }
         if (options.optimize == .ReleaseSmall) {
             emcc.addArg("-Oz");
         } else {
