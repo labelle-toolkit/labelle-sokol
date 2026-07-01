@@ -85,6 +85,8 @@
         "build.zig",
         "build.zig.zon",
         "backend.manifest.zon",
+        "backend.manifest.v2.zon",
+        "backend.hook.zig",
         "build_fragments",
         "templates",
         "src",

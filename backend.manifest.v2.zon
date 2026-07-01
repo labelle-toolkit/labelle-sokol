@@ -1,0 +1,132 @@
+.{
+    // ── sokol backend manifest, SCHEMA v2 (build-graph manifest, epic
+    // labelle-assembler#453 / manifest-v2 #461) — the SHIPPED reference manifest
+    // for the sokol backend. sokol is the reference provider, so this file is the
+    // worked example other backends translate from (design
+    // docs/design/manifest-v2-build-graph.md §3).
+    //
+    // This ships ALONGSIDE the retained v1 `backend.manifest.zon`: the v1 file has
+    // NO `manifest_version` field and stays on the enum/splice path (byte-unchanged
+    // desktop splice), while THIS file (`manifest_version = 2`) drives the v2
+    // build-graph codegen. Keeping them as two files means the v2 route does not
+    // disturb the v1-fixture tests other assembler code depends on. Do NOT bump the
+    // v1 file to v2.
+    //
+    // The assembler's `generate` auto-detects this file and stages `.build_hook`
+    // (below) next to the generated build.zig. Phase A wires only the DESKTOP entry
+    // (`.callback` loop, `.native` target, empty hook residual); the android/ios/wasm
+    // entries are authored here (faithful to §3) so the manifest is complete, and are
+    // exercised through the assembler's golden-cell + hook gates as the shared
+    // packager + hook phases land.
+    .manifest_version = 2,
+    .dir_name = "sokol",
+    .dep_name = "labelle_sokol",
+    .id = "labelle.sokol",
+
+    // Carried forward from the v1 manifest UNCHANGED (same list sokol ships today,
+    // backend.manifest.zon) — v2 must not drop capability negotiation (design §3
+    // review-correction #8).
+    .capabilities = .{
+        .screenshots,
+        .compressed_textures,
+        .fonts,
+        .gamepad_polling,
+        .raw_gui_adapter,
+        .surface_loss,
+        .wasm,
+        .android,
+        .ios,
+        .audio_ogg,
+    },
+
+    // root_alias defaults to `backend_<name>`, so the generated root imports
+    // these as `backend_gfx`/`backend_input`/… exactly as the enum path does.
+    // Sources match the real repo layout (src/gfx.zig, src/input.zig,
+    // src/audio.zig, src/window.zig).
+    .modules = .{
+        .{ .name = "gfx", .source = "src/gfx.zig" },
+        .{ .name = "input", .source = "src/input.zig" },
+        .{ .name = "audio", .source = "src/audio.zig" },
+        .{ .name = "window", .source = "src/window.zig" },
+    },
+
+    // BASE dep_options: ONLY options common to EVERY platform (design §3 merge
+    // contract). `with_imgui` is the only sokol flag all four platforms pass;
+    // `gamepad_*` is desktop-only and `dont_link_system_libs` is mobile-only, so
+    // both are per-platform appends below, never base entries. Mirrors the v1
+    // backend_dep fragment's `b.dependency("labelle_sokol", .{ … })` option set.
+    .dep_options = .{
+        .{ .name = "with_imgui", .value = .gui_is_imgui },
+    },
+
+    .system_libs = .{
+        // sokol links these NDK libs manually on Android (the enum path's
+        // android link block). desktop/ios link via frameworks, not system libs.
+        .android = .{ "android", "log", "GLESv3", "EGL" },
+    },
+    .frameworks = .{
+        // IOSurface/CoreFoundation on Darwin desktop — replaces the v1
+        // build_fragments/link.txt macos/ios switch (the engine's IOSurface
+        // preview producer references these via `@extern "c"`).
+        .desktop = .{ .macos = .{ "IOSurface", "CoreFoundation" } },
+        // Full iOS framework set, emitted declaratively by the assembler (replaces
+        // the enum path's header_ios framework switch). Exercised in the iOS PR.
+        .ios = .{ "Foundation", "UIKit", "Metal", "MetalKit", "AudioToolbox", "AVFoundation", "QuartzCore", "GameController" },
+    },
+
+    .platforms = .{
+        .desktop = .{
+            .entry = "templates/desktop.txt",
+            .loop_style = .callback,
+            .target = .native,
+            .artifacts = .{ .{ .name = "sokol_clib" } },
+            // gamepad_* is desktop-only — APPENDED to the base `with_imgui`, so
+            // desktop's literal forwards all three flags (the v1 fragment's
+            // with_imgui/gamepad_enabled/gamepad_hidapi param set).
+            .dep_options = .{
+                .{ .name = "gamepad_enabled", .value = .gamepad_enabled },
+                .{ .name = "gamepad_hidapi", .value = .gamepad_hidapi },
+            },
+            .package = .binary,
+        },
+        .ios = .{
+            .entry = "templates/mobile.txt",
+            .loop_style = .callback,
+            .target = .resolved,
+            .link_libc = true,
+            .artifacts = .{ .{ .name = "sokol_clib" } },
+            .dep_options = .{ .{ .name = "dont_link_system_libs", .value = .true_literal } },
+            .package = .binary,
+        },
+        .android = .{
+            .entry = "templates/mobile.txt",
+            .loop_style = .callback,
+            .target = .resolved,
+            .pic = true,
+            .link_libc = true,
+            .artifacts = .{ .{ .name = "sokol_clib", .pic = true } },
+            .dep_options = .{ .{ .name = "dont_link_system_libs", .value = .true_literal } },
+            .package = .{ .apk = .{ .manifest = "AndroidManifest.xml.tmpl" } },
+        },
+        .wasm = .{
+            // sokol shares ONE entry template across desktop and wasm (both drive
+            // sokol_app via `pub fn main()` → `window.run`); the enum path proves
+            // this (root.zig: "sokol uses a single template for desktop and wasm"),
+            // so wasm reuses templates/desktop.txt rather than a separate wasm.txt.
+            .entry = "templates/desktop.txt",
+            .loop_style = .callback,
+            .target = .{ .triple = "wasm32-emscripten" },
+            .artifacts = .{ .{ .name = "sokol_clib" } },
+            .dep_options = .{},
+            .root_build_deps = .{ .{ .name = "emsdk", .resolution = .builtin } },
+            .package = .{ .web = .{ .shell = null } },
+        },
+    },
+
+    // Dedicated hook file (NOT sokol's own build.zig, which re-exports
+    // `@import("sokol")` at top level — a name absent from the generated root
+    // package). Desktop has an EMPTY post_wire and uses the built-in target
+    // resolver, so the desktop path never invokes the hook; it exists for the
+    // android/ios/wasm residual.
+    .build_hook = "backend.hook.zig",
+}
