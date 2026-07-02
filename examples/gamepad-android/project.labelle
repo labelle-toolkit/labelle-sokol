@@ -1,0 +1,61 @@
+// Gamepad input demo — sokol backend, Android platform.
+//
+// On-device sibling of `labelle-raylib/examples/gamepad` (raylib desktop). It
+// REUSES that demo's backend-agnostic HUD logic verbatim
+// (`scripts/gamepad_hud.zig`, `scripts/connected_pads.zig`,
+// `hooks/gamepad_hooks.zig`): the HUD polls the engine input-mixin forwarders
+// (`game.isGamepad*` / `getGamepadAxisValue`) and reads the connected-pad
+// registry fed by the engine `gamepad_connected` / `gamepad_disconnected`
+// events. None of that is backend-specific, so the script ports straight to
+// sokol.
+//
+// The HUD draws through Dear ImGui via the published `imgui` GUI plugin's
+// SOKOL bridge. `@import("gui_backend").ig` resolves to sokol-imgui because
+// `backend = .sokol`, exposing the same cimgui API the raylib HUD uses.
+//
+// This is the on-device verification vehicle for the merged gamepad
+// detection (#248) + analog state (#250) and for #261. The generated sokol
+// Android build pulls the sokol backend's gamepad AInputEvent forwarding +
+// `android_gamepad_state.zig` + the #248 JNI detection, so a controller
+// paired to the device drives the HUD.
+.{
+    .name = "example_gamepad_android",
+    .title = "LaBelle - Gamepad Input Demo (Android)",
+    .width = 900,
+    .height = 640,
+    .target_fps = 60,
+    .backend = .sokol,
+    // sokol is a BUNDLED backend inside the assembler, so `.backend = .sokol`
+    // alone resolves to the assembler's own `backends/sokol` slot. Pin the
+    // backend package to THIS repo so the example builds against the
+    // labelle-sokol code it ships beside (backend-agnosticism, assembler#520).
+    .backend_package = .{ .name = "sokol", .repo = "local:../.." },
+    .y_axis = .up,
+    .ecs = .mock,
+    .initial_prefab = "main",
+    .states = .{"playing"},
+    // Dear ImGui via the published `imgui` plugin. On sokol the assembler
+    // resolves `gui_backend` to the plugin's sokol-imgui bridge (see
+    // labelle-imgui/bridges/sokol), which already carries full Android
+    // (NDK sysroot + PIC) support — the same bridge Flying Platform ships.
+    .gui = .{ .plugin = "imgui" },
+    .plugins = .{
+        .{ .name = "imgui", .repo = "github.com/labelle-toolkit/labelle-imgui", .version = "0.10.0" },
+    },
+    .layers = .{
+        .{ .name = "background", .order = 0, .space = .screen },
+        .{ .name = "world", .order = 1, .space = .world },
+        .{ .name = "ui", .order = 2, .space = .screen },
+    },
+    .android = .{
+        .app_name = "LaBelle Gamepad Demo",
+        .package_name = "com.labelle.gamepad_demo",
+        .min_sdk_version = 28,
+        .target_sdk_version = 34,
+    },
+    .core_version = "1.22.0",
+    .engine_version = "1.65.0",
+    .gfx_version = "1.19.0",
+    .labelle_version = "local:../../../labelle-cli",
+    .assembler_version = "local:../../../labelle-assembler",
+}

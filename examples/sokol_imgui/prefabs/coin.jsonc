@@ -1,0 +1,10 @@
+{
+    "components": {
+        "Sprite": {
+            "sprite_name": "coin.png",
+            "pivot": "center",
+            "layer": "world"
+        },
+        "Coin": {}
+    }
+}

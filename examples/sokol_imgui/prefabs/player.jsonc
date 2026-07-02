@@ -1,0 +1,12 @@
+{
+    "components": {
+        "Sprite": {
+            "sprite_name": "player.png",
+            "pivot": "center",
+            "layer": "world"
+        },
+        "Velocity": { "x": 0, "y": 0 },
+        "Player": {},
+        "Score": { "value": 0 }
+    }
+}
