@@ -181,18 +181,20 @@ pub fn selectIosTarget(device_mode: bool, host_arch: std.Target.Cpu.Arch) IosTar
 /// Returns null when Xcode/xcrun is unavailable so the caller can panic with a
 /// readable message.
 fn getIosSdkPath(b: *std.Build, sdk_name: []const u8) ?[]const u8 {
-    const result = std.process.Child.run(.{
-        .allocator = b.allocator,
-        .argv = &.{ "xcrun", "--sdk", sdk_name, "--show-sdk-path" },
-    }) catch return null;
-    defer b.allocator.free(result.stdout);
-    defer b.allocator.free(result.stderr);
-    if (result.term == .Exited and result.term.Exited == 0) {
-        const path = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
-        if (path.len == 0) return null;
-        return b.allocator.dupe(u8, path) catch null;
-    }
-    return null;
+    // Zig 0.16 removed `std.process.Child.run`; `std.Build.runAllowFail` is the
+    // build-time subprocess helper. It captures stdout and returns
+    // `error.ExitCodeFailure` on a non-zero exit, so a single `catch return null`
+    // covers spawn/read/exit-code failures (xcrun missing, no SDK, etc.).
+    var code: u8 = undefined;
+    const stdout = b.runAllowFail(
+        &.{ "xcrun", "--sdk", sdk_name, "--show-sdk-path" },
+        &code,
+        .ignore,
+    ) catch return null;
+    defer b.allocator.free(stdout);
+    const path = std.mem.trim(u8, stdout, &std.ascii.whitespace);
+    if (path.len == 0) return null;
+    return b.allocator.dupe(u8, path) catch null;
 }
 
 /// Produce the android/ios `ResolvedTarget`. Runs before any `b.dependency`, so

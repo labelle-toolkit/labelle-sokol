@@ -121,3 +121,189 @@ jobs:
           if [ -z "$bin" ]; then echo "example_sokol not built"; exit 1; fi
           echo "found: $bin"
           file "$bin"
+
+  # Integration: generate + build the sokol + Dear ImGui desktop example (which
+  # now lives HERE, not in labelle-assembler — assembler#520). Same shape as the
+  # `example-build` job above, but exercises the `imgui` GUI plugin's SOKOL
+  # bridge: the example pins the published `labelle-imgui` (0.10.0) and the
+  # backend to THIS repo via `.backend_package = local:../..`. Runs on macOS
+  # (sokol desktop → Metal). Build-only — produces `example_sokol_imgui`.
+  imgui-example-build:
+    name: sokol + imgui desktop example generate + build
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout labelle-sokol
+        uses: actions/checkout@v4
+        with:
+          path: labelle-sokol
+          persist-credentials: false
+
+      - name: Checkout labelle-assembler (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-assembler
+          ref: main
+          path: labelle-assembler
+          persist-credentials: false
+
+      - name: Checkout labelle-cli (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-cli
+          ref: main
+          path: labelle-cli
+          persist-credentials: false
+
+      - name: Checkout labelle-gui for the labelle-cli build
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-gui
+          ref: main
+          path: labelle-cli/zig-pkg/labelle-gui
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The desktop gamepad source (labelle-sdl-gamepad) links SDL2; the sokol
+      # desktop input path links it on macOS too.
+      - name: Install SDL2 (macOS)
+        run: brew install sdl2
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            ~/Library/Caches/zig
+            labelle-sokol/examples/sokol_imgui/.labelle/sokol_desktop/.zig-cache
+          key: sokol-imgui-example-${{ hashFiles('labelle-sokol/examples/sokol_imgui/project.labelle', 'labelle-sokol/build.zig.zon') }}
+          restore-keys: |
+            sokol-imgui-example-
+
+      - name: Build labelle-assembler
+        run: cd labelle-assembler && zig build
+
+      - name: Build labelle-cli
+        run: cd labelle-cli && zig build
+
+      - name: Generate + build the example
+        env:
+          LABELLE_ASSEMBLER: ${{ github.workspace }}/labelle-assembler/zig-out/bin/labelle-assembler
+        run: |
+          cd labelle-sokol/examples/sokol_imgui
+          "$GITHUB_WORKSPACE/labelle-cli/zig-out/bin/labelle" generate
+          cd .labelle/sokol_desktop
+          zig build
+
+      - name: Verify example binary
+        run: |
+          set -euo pipefail
+          bin=$(find labelle-sokol/examples/sokol_imgui/.labelle/sokol_desktop/zig-out/bin -name 'example_sokol_imgui' | head -1)
+          if [ -z "$bin" ]; then echo "example_sokol_imgui not built"; exit 1; fi
+          echo "found: $bin"
+          file "$bin"
+
+  # Integration: generate + cross-build the gamepad-android example (sokol +
+  # imgui, Android). Mirrors labelle-bgfx's `android-example` .so job — NDK
+  # cross-build, no device/emulator/APK. Produces the aarch64 NativeActivity
+  # libgame.so.
+  #
+  # This migration is the first consumer of the sokol-Android manifest-splice
+  # (`backend_package`) path, so it surfaced a gap: the `.backend_sokol_android`
+  # template section was missing the `backend_input` labelle-core override that
+  # `.backend_bgfx_android` already carried (the sokol Android input adapter
+  # imports labelle-core for `AndroidBackendContext`, the vtable handed to
+  # `engine.core.registerAndroidBackend`; without the override `input` resolves
+  # its OWN pinned core tarball and the build fails to type-check). Fixed in
+  # labelle-assembler#524 (now on assembler `main`), so this is a hard-required
+  # job. See assembler#520 / labelle-imgui#25.
+  gamepad-android-example:
+    name: gamepad-android example .so cross-build
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout labelle-sokol
+        uses: actions/checkout@v4
+        with:
+          path: labelle-sokol
+          persist-credentials: false
+
+      - name: Checkout labelle-assembler (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-assembler
+          ref: main
+          path: labelle-assembler
+          persist-credentials: false
+
+      - name: Checkout labelle-cli (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-cli
+          ref: main
+          path: labelle-cli
+          persist-credentials: false
+
+      - name: Checkout labelle-gui for the labelle-cli build
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-gui
+          ref: main
+          path: labelle-cli/zig-pkg/labelle-gui
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Set up Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      # Cache the cross-compiled sokol/cimgui C/C++ (the expensive part).
+      - name: Cache Zig Android build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            labelle-sokol/examples/gamepad-android/.labelle/sokol_android/.zig-cache
+          key: sokol-android-${{ hashFiles('labelle-sokol/examples/gamepad-android/project.labelle', 'labelle-sokol/build.zig.zon') }}
+          restore-keys: |
+            sokol-android-
+
+      - name: Build labelle-assembler
+        run: cd labelle-assembler && zig build
+
+      - name: Build labelle-cli
+        run: cd labelle-cli && zig build
+
+      - name: Generate + cross-build libgame.so (aarch64-linux-android)
+        env:
+          LABELLE_ASSEMBLER: ${{ github.workspace }}/labelle-assembler/zig-out/bin/labelle-assembler
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cd labelle-sokol/examples/gamepad-android
+          "$GITHUB_WORKSPACE/labelle-cli/zig-out/bin/labelle" generate --platform=android
+          cd .labelle/sokol_android
+          zig build
+
+      - name: Verify libgame.so
+        run: |
+          set -euo pipefail
+          so=$(find labelle-sokol/examples/gamepad-android/.labelle/sokol_android -name 'libgame.so' | head -1)
+          if [ -z "$so" ]; then echo "libgame.so not found"; exit 1; fi
+          echo "found: $so"
+          file "$so"
+          file "$so" | grep -q 'ELF 64-bit.*ARM aarch64' || { echo "FAIL: not an aarch64 ELF"; exit 1; }
+          # NativeActivity entry export (sokol's android glue provides
+          # ANativeActivity_onCreate). Kept as a soft check.
+          nm -D "$so" | grep -q 'ANativeActivity_onCreate' \
+            && echo "ANativeActivity_onCreate exported" \
+            || echo "WARN: ANativeActivity_onCreate not found in dynamic symbols"

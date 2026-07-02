@@ -1,0 +1,7 @@
+{
+    // No entities — the whole demo is an ImGui HUD driven by the
+    // gamepad_hud.zig script, plus the engine `gamepad_connected` /
+    // `gamepad_disconnected` events handled in connected_pads.zig.
+    "name": "main",
+    "entities": []
+}

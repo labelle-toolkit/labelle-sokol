@@ -1,0 +1,5 @@
+.labelle/
+.zig-cache/
+zig-out/
+labelle.lock
+*.apk
