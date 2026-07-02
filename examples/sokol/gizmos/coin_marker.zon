@@ -1,0 +1,12 @@
+.{
+    .match = .{"CoinMarker"},
+    .entity = .{
+        .Shape = .{
+            .x = -16,
+            .y = 16,
+            .shape = .{ .rectangle = .{ .width = 32, .height = 32, .fill = .outline } },
+            .color = .{ .r = 255, .g = 51, .b = 51, .a = 255 },
+            .layer = .world,
+        },
+    },
+}

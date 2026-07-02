@@ -33,3 +33,91 @@ jobs:
         run: brew install sdl2
       - name: Build + test
         run: zig build test
+
+  # Integration: generate + build the sokol desktop example (which now lives HERE,
+  # not in labelle-assembler — the backend-agnosticism remainder, assembler#520).
+  # Verifies the sokol backend works end-to-end through the toolkit against THIS
+  # repo's code: the example pins its backend to `local:../..` (this checkout) via
+  # `.backend_package`, released core/engine/gfx (fetched), and the assembler/cli as
+  # siblings built from main. Runs on macOS (sokol desktop → Metal). Build-only —
+  # produces the `example_sokol` binary; no windowed run. (A headless-screenshot
+  # smoke check is a possible follow-up: sokol is the one backend that can render
+  # with no GUI session, assembler >=0.53.)
+  example-build:
+    name: sokol desktop example generate + build
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout labelle-sokol
+        uses: actions/checkout@v4
+        with:
+          path: labelle-sokol
+          persist-credentials: false
+
+      - name: Checkout labelle-assembler (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-assembler
+          ref: main
+          path: labelle-assembler
+          persist-credentials: false
+
+      - name: Checkout labelle-cli (main)
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-cli
+          ref: main
+          path: labelle-cli
+          persist-credentials: false
+
+      - name: Checkout labelle-gui for the labelle-cli build
+        uses: actions/checkout@v4
+        with:
+          repository: labelle-toolkit/labelle-gui
+          ref: main
+          path: labelle-cli/zig-pkg/labelle-gui
+          persist-credentials: false
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # The desktop gamepad source (labelle-sdl-gamepad) links SDL2; the sokol
+      # desktop input path links it on macOS too.
+      - name: Install SDL2 (macOS)
+        run: brew install sdl2
+
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/zig
+            ~/Library/Caches/zig
+            labelle-sokol/examples/sokol/.labelle/sokol_desktop/.zig-cache
+          key: sokol-example-${{ hashFiles('labelle-sokol/examples/sokol/project.labelle', 'labelle-sokol/build.zig.zon') }}
+          restore-keys: |
+            sokol-example-
+
+      - name: Build labelle-assembler
+        run: cd labelle-assembler && zig build
+
+      - name: Build labelle-cli
+        run: cd labelle-cli && zig build
+
+      - name: Generate + build the example
+        env:
+          LABELLE_ASSEMBLER: ${{ github.workspace }}/labelle-assembler/zig-out/bin/labelle-assembler
+        run: |
+          cd labelle-sokol/examples/sokol
+          "$GITHUB_WORKSPACE/labelle-cli/zig-out/bin/labelle" generate
+          cd .labelle/sokol_desktop
+          zig build
+
+      - name: Verify example binary
+        run: |
+          set -euo pipefail
+          bin=$(find labelle-sokol/examples/sokol/.labelle/sokol_desktop/zig-out/bin -name 'example_sokol' | head -1)
+          if [ -z "$bin" ]; then echo "example_sokol not built"; exit 1; fi
+          echo "found: $bin"
+          file "$bin"
