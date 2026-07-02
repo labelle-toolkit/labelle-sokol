@@ -212,23 +212,18 @@ jobs:
   # cross-build, no device/emulator/APK. Produces the aarch64 NativeActivity
   # libgame.so.
   #
-  # continue-on-error: this job is GATED on an assembler codegen fix that is not
-  # yet on assembler `main`. The `.backend_sokol_android` template section
-  # (labelle-assembler src/templates/build_zig.txt) is missing the
-  # `backend_input` labelle-core override that `.backend_bgfx_android` already
-  # carries: the sokol Android input adapter imports labelle-core for
-  # `AndroidBackendContext` (the vtable handed to
-  # `engine.core.registerAndroidBackend`), so without the override `input`
-  # resolves its OWN pinned core tarball — a different module instance than
-  # engine/gfx — and the build fails to type-check ("expected type
-  # 'android_backend.AndroidBackendContext', found ...'"). This migration is the
-  # first consumer of the sokol-Android path, so it surfaces the gap. Flip this
-  # to a hard-required job once the assembler "unify core onto backends
-  # (sokol-android)" follow-up lands on main. See assembler#520 / labelle-imgui#25.
+  # This migration is the first consumer of the sokol-Android manifest-splice
+  # (`backend_package`) path, so it surfaced a gap: the `.backend_sokol_android`
+  # template section was missing the `backend_input` labelle-core override that
+  # `.backend_bgfx_android` already carried (the sokol Android input adapter
+  # imports labelle-core for `AndroidBackendContext`, the vtable handed to
+  # `engine.core.registerAndroidBackend`; without the override `input` resolves
+  # its OWN pinned core tarball and the build fails to type-check). Fixed in
+  # labelle-assembler#524 (now on assembler `main`), so this is a hard-required
+  # job. See assembler#520 / labelle-imgui#25.
   gamepad-android-example:
     name: gamepad-android example .so cross-build
     if: ${{ github.event_name == 'pull_request' }}
-    continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
