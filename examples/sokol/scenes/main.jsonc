@@ -1,0 +1,55 @@
+{
+    "name": "main",
+    "entities": [
+        {
+            "components": {
+                "Position": { "x": 0, "y": 0 },
+                "Sprite": {
+                    "sprite_name": "player.png",
+                    "pivot": "center",
+                    "layer": "world",
+                    "scale_x": 2.0,
+                    "scale_y": 2.0
+                },
+                "PlayerMarker": {}
+            }
+        },
+        {
+            "components": {
+                "Position": { "x": -100, "y": -80 },
+                "Sprite": {
+                    "sprite_name": "coin.png",
+                    "pivot": "center",
+                    "layer": "world"
+                },
+                "CoinMarker": {}
+            }
+        },
+        {
+            "components": {
+                "Position": { "x": 100, "y": 80 },
+                "Sprite": {
+                    "sprite_name": "wall.png",
+                    "pivot": "center",
+                    "layer": "world",
+                    "scale_x": 2.0,
+                    "scale_y": 2.0
+                },
+                "WallMarker": {}
+            }
+        },
+        {
+            "components": {
+                "Position": { "x": 0, "y": 150 },
+                "Sprite": {
+                    "sprite_name": "jump_0001.png",
+                    "pivot": "center",
+                    "layer": "world",
+                    "scale_x": 4.0,
+                    "scale_y": 4.0
+                },
+                "JumperMarker": {}
+            }
+        }
+    ]
+}

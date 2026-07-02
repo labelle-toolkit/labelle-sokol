@@ -1,0 +1,12 @@
+.{
+    .match = .{"JumperMarker"},
+    .entity = .{
+        .Shape = .{
+            .x = -48,
+            .y = 48,
+            .shape = .{ .rectangle = .{ .width = 96, .height = 96, .fill = .outline } },
+            .color = .{ .r = 255, .g = 255, .b = 0, .a = 255 },
+            .layer = .world,
+        },
+    },
+}
