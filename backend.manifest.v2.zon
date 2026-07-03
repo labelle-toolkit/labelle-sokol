@@ -78,6 +78,11 @@
         .desktop = .{
             .entry = "templates/desktop.txt",
             .loop_style = .callback,
+            // #461: the sokol callback SHAPE as manifest data (was the
+            // `cfg.backend == .sokol` enum branch in the assembler). The
+            // privileged `sokol_readback` is reserved to this manifest's
+            // `labelle.*` id (assembler-side `assertLifecyclePrivilege`).
+            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .native,
             .artifacts = .{ .{ .name = "sokol_clib" } },
             // gamepad_* is desktop-only — APPENDED to the base `with_imgui`, so
@@ -92,6 +97,7 @@
         .ios = .{
             .entry = "templates/mobile.txt",
             .loop_style = .callback,
+            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .resolved,
             .link_libc = true,
             .artifacts = .{ .{ .name = "sokol_clib" } },
@@ -101,6 +107,7 @@
         .android = .{
             .entry = "templates/mobile.txt",
             .loop_style = .callback,
+            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .resolved,
             .pic = true,
             .link_libc = true,
@@ -115,6 +122,7 @@
             // so wasm reuses templates/desktop.txt rather than a separate wasm.txt.
             .entry = "templates/desktop.txt",
             .loop_style = .callback,
+            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .{ .triple = "wasm32-emscripten" },
             .artifacts = .{ .{ .name = "sokol_clib" } },
             .dep_options = .{},
