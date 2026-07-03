@@ -9,10 +9,6 @@ const frame_duration: f32 = 0.1;
 const total_duration: f32 = frame_duration * @as(f32, @floatFromInt(frames.len));
 
 var elapsed: f32 = 0;
-// Cached on first tick — avoids rescanning every entity + doing a string
-// prefix check per frame. A production game would tag this with a
-// dedicated animation component instead.
-var anim_entity: ?u32 = null;
 
 pub fn tick(game: anytype, dt: f32) void {
     // `@mod` on f32 handles an arbitrarily large `dt` — e.g. a long
@@ -28,21 +24,19 @@ pub fn tick(game: anytype, dt: f32) void {
 
     const Sprite = @TypeOf(game.*).SpriteComp;
 
-    if (anim_entity == null) {
-        var view = game.ecs_backend.view(.{Sprite}, .{});
-        defer view.deinit();
-        while (view.next()) |entity| {
-            const sprite = game.ecs_backend.getComponent(entity, Sprite).?;
-            if (std.mem.startsWith(u8, sprite.sprite_name, "jump_")) {
-                anim_entity = @intCast(entity);
-                break;
-            }
-        }
-    }
-
-    if (anim_entity) |entity_id| {
-        if (game.ecs_backend.getComponent(@intCast(entity_id), Sprite)) |sprite| {
+    // Re-query the animated entity each frame rather than caching its id in a
+    // file-level global: a cached id would dangle — or, worse, point at a
+    // DIFFERENT reused entity — across a scene reload or a `running`-state
+    // re-entry. The frames all keep the `jump_` prefix, so this re-finds the
+    // same entity every tick. The scan is trivial for a demo; a production game
+    // would tag the entity with a dedicated animation component instead.
+    var view = game.ecs_backend.view(.{Sprite}, .{});
+    defer view.deinit();
+    while (view.next()) |entity| {
+        const sprite = game.ecs_backend.getComponent(entity, Sprite).?;
+        if (std.mem.startsWith(u8, sprite.sprite_name, "jump_")) {
             sprite.sprite_name = frames[idx];
+            break;
         }
     }
 }
