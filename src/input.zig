@@ -404,7 +404,13 @@ pub fn handleEvent(ev: [*c]const sapp.Event) void {
             if (ki >= 0 and ki < 512) {
                 const k: usize = @intCast(ki);
                 keys_down[k] = true;
-                keys_pressed[k] = true;
+                // Only record the down-*edge* on a fresh press, not on OS
+                // auto-repeat. sokol re-sends KEY_DOWN with `key_repeat == true`
+                // while a key is held; `keys_pressed` is the edge array (cleared
+                // each frame by newFrame()) and must be true exactly once per
+                // physical press to match raylib's `IsKeyPressed` semantics.
+                // `keys_down` (held state) is still set on every event.
+                if (!ev.*.key_repeat) keys_pressed[k] = true;
             }
         },
         .KEY_UP => {
@@ -532,4 +538,44 @@ test "shouldConsumeBack honors the consume_back flag" {
 
     consume_back = false;
     try std.testing.expect(!shouldConsumeBack(0x04));
+}
+
+// Regression lock for labelle-assembler#263: a KEY_DOWN carrying
+// `key_repeat == true` (OS auto-repeat) must NOT set the down-*edge*
+// (`keys_pressed` / isKeyPressed), while still tracking held state
+// (`keys_down` / isKeyDown). isKeyPressed must be true exactly once per
+// physical press, matching raylib's `IsKeyPressed` semantics.
+test "key_repeat does not re-trigger the isKeyPressed edge" {
+    // A representative in-range keycode (must be < 512 and not the back key).
+    const key: usize = 65; // 'A'
+
+    // Reset the module-global state this test touches.
+    keys_down = [_]bool{false} ** 512;
+    keys_pressed = [_]bool{false} ** 512;
+    defer {
+        keys_down = [_]bool{false} ** 512;
+        keys_pressed = [_]bool{false} ** 512;
+    }
+
+    var ev = std.mem.zeroes(sapp.Event);
+    ev.key_code = @enumFromInt(@as(i32, @intCast(key)));
+
+    // Fresh press: sets both held state and the down-edge.
+    ev.type = .KEY_DOWN;
+    ev.key_repeat = false;
+    handleEvent(&ev);
+    try std.testing.expect(isKeyDown(key));
+    try std.testing.expect(isKeyPressed(key));
+
+    // Model the frame boundary: newFrame() clears the edge array (but pumps
+    // the gamepad source, so clear the edge directly to keep the test pure).
+    keys_pressed = [_]bool{false} ** 512;
+    try std.testing.expect(isKeyDown(key));
+    try std.testing.expect(!isKeyPressed(key));
+
+    // OS auto-repeat while held: still down, but NO new edge.
+    ev.key_repeat = true;
+    handleEvent(&ev);
+    try std.testing.expect(isKeyDown(key));
+    try std.testing.expect(!isKeyPressed(key));
 }
