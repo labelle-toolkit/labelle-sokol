@@ -443,4 +443,7 @@ pub fn build(b: *std.Build) void {
     );
     test_host_step.dependOn(&b.addRunArtifact(audio_compile_check).step);
     test_host_step.dependOn(&b.addRunArtifact(gfx_compile_check).step);
+    // input.zig's pure keyboard-edge tests (back-key policy + the #263
+    // key-repeat regression) call no sokol API, so run them natively too.
+    test_host_step.dependOn(&b.addRunArtifact(input_compile_check).step);
 }
