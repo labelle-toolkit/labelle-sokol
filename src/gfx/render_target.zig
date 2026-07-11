@@ -105,15 +105,36 @@ fn validId(id: RenderTargetId) bool {
     return id >= 1 and id <= target_count and targets[id - 1].isValid();
 }
 
+/// Pick the pool slot a new render target should occupy: the first freed
+/// (inactive) slot in `0..target_count`, else `target_count` (append/grow). Pure
+/// — no GPU — so the slot-reuse discipline is unit-testable without a device.
+fn pickSlot() u32 {
+    var i: u32 = 0;
+    while (i < target_count) : (i += 1) {
+        if (!targets[i].isValid()) return i;
+    }
+    return target_count;
+}
+
 /// Create an offscreen render target `w`×`h`. Returns a 1-based handle, or `0`
 /// (INVALID) on a bad size / pool exhaustion / sokol resource failure. BGRA8
 /// colour + DEPTH_STENCIL depth + sample_count 1 — byte-matching the swapchain /
 /// headless-fallback environment defaults, so the DEFAULT-format sgl / material /
 /// post-fx pipelines all draw into it without a format mismatch.
+///
+/// Slot reuse: a freed (inactive) slot is reused before the pool grows, so a game
+/// that dynamically creates/destroys render targets does NOT exhaust the pool via
+/// churn — the hard `MAX_TARGETS` cap is only reached when that many are LIVE at
+/// once (same slot-reuse discipline as the material seam's LUT registry).
 pub fn createRenderTarget(w: u16, h: u16) RenderTargetId {
     if (w == 0 or h == 0) return 0;
-    if (target_count >= MAX_TARGETS) {
-        std.log.warn("labelle-sokol: render-target pool exhausted ({d}); post-fx/offscreen create failed", .{MAX_TARGETS});
+
+    // Prefer a freed slot; only grow the pool (and hit the hard cap) when none is
+    // free. Determined BEFORE allocating GPU resources so an exhausted pool fails
+    // cheaply without creating (then having to destroy) images/views.
+    const slot = pickSlot();
+    if (slot == target_count and target_count >= MAX_TARGETS) {
+        std.log.warn("labelle-sokol: render-target pool exhausted ({d} live); post-fx/offscreen create failed", .{MAX_TARGETS});
         return 0;
     }
 
@@ -151,9 +172,9 @@ pub fn createRenderTarget(w: u16, h: u16) RenderTargetId {
     rt.attachments.colors[0] = rt.color_att_view;
     rt.attachments.depth_stencil = rt.depth_att_view;
 
-    targets[target_count] = rt;
-    target_count += 1;
-    return target_count; // 1-based handle
+    targets[slot] = rt;
+    if (slot == target_count) target_count += 1; // grew the pool
+    return slot + 1; // 1-based handle
 }
 
 fn destroyResources(rt: *RenderTarget) void {
@@ -166,10 +187,12 @@ fn destroyResources(rt: *RenderTarget) void {
     rt.* = .{};
 }
 
-/// Release render target `id`. No-op on an unknown handle. The slot is emptied but
-/// NOT compacted (handles stay stable); a fresh `createRenderTarget` reuses the
-/// tail. The post-fx driver creates its two targets once and reuses them across
-/// frames, so the pool never churns in practice.
+/// Release render target `id`. Safe no-op on an unknown / already-freed / invalid
+/// handle (the `validId` guard). `destroyResources` empties the slot and marks it
+/// INACTIVE (`color_img.id == 0`), so a later `createRenderTarget` reuses it (see
+/// its slot-reuse scan) — handles stay stable, the pool never churns. The tail is
+/// additionally compacted below so the common create-two-then-destroy-two driver
+/// lifecycle fully recovers the high-water mark.
 pub fn destroyRenderTarget(id: RenderTargetId) void {
     if (!validId(id)) return;
     destroyResources(&targets[id - 1]);
@@ -276,6 +299,12 @@ pub fn compositePostFx() void {
 }
 
 fn executePass(q: QueuedPass) void {
+    // Re-validate at EXECUTE time. `applyPostPass` validated `src`/`dst` when the
+    // pass was QUEUED, but this runs later at `flushScene`; a target destroyed
+    // between queue and flush (e.g. a mid-frame hook calling `destroyRenderTarget`)
+    // would otherwise index a freed slot — a use-after-free. Skip the pass instead
+    // of crashing; the ping-pong chain simply drops this hop.
+    if (!validId(q.src) or !validId(q.dst)) return;
     const s = targets[q.src - 1];
     const d = targets[q.dst - 1];
 
@@ -565,21 +594,32 @@ fn ensureInitialized() bool {
         .label = "postfx-composite-vbuf",
     });
     if (fullscreen_vbuf.id == 0 or composite_vbuf.id == 0) {
+        cleanupFailedInit(&.{}, &.{});
         supported_backend = false;
         return false;
     }
 
-    const shd_bloom = makeShader(srcs, srcs.fs_bloom, "postfx-bloom", .{ .has_params = true, .has_lut = false });
-    const shd_vignette = makeShader(srcs, srcs.fs_vignette, "postfx-vignette", .{ .has_params = true, .has_lut = false });
-    const shd_color_grade = makeShader(srcs, srcs.fs_color_grade, "postfx-color-grade", .{ .has_params = true, .has_lut = true });
-    const shd_crt = makeShader(srcs, srcs.fs_crt, "postfx-crt", .{ .has_params = true, .has_lut = false });
-    const shd_blit = makeShader(srcs, srcs.fs_blit, "postfx-blit", .{ .has_params = false, .has_lut = false });
-    for ([_]sg.Shader{ shd_bloom, shd_vignette, shd_color_grade, shd_crt, shd_blit }) |s| {
+    const shaders_arr = [_]sg.Shader{
+        makeShader(srcs, srcs.fs_bloom, "postfx-bloom", .{ .has_params = true, .has_lut = false }),
+        makeShader(srcs, srcs.fs_vignette, "postfx-vignette", .{ .has_params = true, .has_lut = false }),
+        makeShader(srcs, srcs.fs_color_grade, "postfx-color-grade", .{ .has_params = true, .has_lut = true }),
+        makeShader(srcs, srcs.fs_crt, "postfx-crt", .{ .has_params = true, .has_lut = false }),
+        makeShader(srcs, srcs.fs_blit, "postfx-blit", .{ .has_params = false, .has_lut = false }),
+    };
+    for (shaders_arr) |s| {
         if (s.id == 0) {
+            // Destroy the buffers + any shaders that DID create before bailing, so
+            // a partial-build failure doesn't leak GPU resources.
+            cleanupFailedInit(&shaders_arr, &.{});
             supported_backend = false;
             return false;
         }
     }
+    const shd_bloom = shaders_arr[0];
+    const shd_vignette = shaders_arr[1];
+    const shd_color_grade = shaders_arr[2];
+    const shd_crt = shaders_arr[3];
+    const shd_blit = shaders_arr[4];
 
     bloom_pip = makePipeline(shd_bloom, false);
     vignette_pip = makePipeline(shd_vignette, false);
@@ -587,8 +627,11 @@ fn ensureInitialized() bool {
     crt_pip = makePipeline(shd_crt, false);
     blit_opaque_pip = makePipeline(shd_blit, false);
     blit_blend_pip = makePipeline(shd_blit, true);
-    for ([_]sg.Pipeline{ bloom_pip, vignette_pip, color_grade_pip, crt_pip, blit_opaque_pip, blit_blend_pip }) |p| {
+    const pips_arr = [_]sg.Pipeline{ bloom_pip, vignette_pip, color_grade_pip, crt_pip, blit_opaque_pip, blit_blend_pip };
+    for (pips_arr) |p| {
         if (p.id == 0) {
+            // Destroy the buffers, shaders, and any pipelines built so far.
+            cleanupFailedInit(&shaders_arr, &pips_arr);
             supported_backend = false;
             return false;
         }
@@ -596,6 +639,25 @@ fn ensureInitialized() bool {
 
     supported_backend = true;
     return true;
+}
+
+/// Destroy the GPU resources an aborted `ensureInitialized` had created so far,
+/// so a partial-build failure degrades cleanly WITHOUT leaking sg buffers /
+/// shaders / pipelines. Resets the pipeline + buffer globals back to the empty
+/// (not-initialised) state. Mirrors the material seam's partial-build cleanup.
+fn cleanupFailedInit(shds: []const sg.Shader, pips: []const sg.Pipeline) void {
+    for (pips) |p| if (p.id != 0) sg.destroyPipeline(p);
+    for (shds) |s| if (s.id != 0) sg.destroyShader(s);
+    if (fullscreen_vbuf.id != 0) sg.destroyBuffer(fullscreen_vbuf);
+    if (composite_vbuf.id != 0) sg.destroyBuffer(composite_vbuf);
+    fullscreen_vbuf = .{};
+    composite_vbuf = .{};
+    bloom_pip = .{};
+    vignette_pip = .{};
+    color_grade_pip = .{};
+    crt_pip = .{};
+    blit_opaque_pip = .{};
+    blit_blend_pip = .{};
 }
 
 // ── Tests (pure-CPU: capability gate + contract introspection) ───────────────
@@ -627,4 +689,34 @@ test "validId rejects 0 and out-of-range without touching GPU" {
     target_count = 0;
     try std.testing.expect(!validId(0));
     try std.testing.expect(!validId(1));
+}
+
+test "pickSlot reuses a freed hole before growing the pool" {
+    const saved_count = target_count;
+    const saved = targets;
+    defer {
+        target_count = saved_count;
+        targets = saved;
+    }
+
+    // Empty pool → append at 0.
+    target_count = 0;
+    try std.testing.expectEqual(@as(u32, 0), pickSlot());
+
+    // Three live targets, no hole → append at the tail (grows the pool).
+    target_count = 3;
+    targets[0].color_img.id = 1;
+    targets[1].color_img.id = 2;
+    targets[2].color_img.id = 3;
+    try std.testing.expectEqual(@as(u32, 3), pickSlot());
+
+    // Free the MIDDLE one → the next create reuses that hole (no growth), so a
+    // create/destroy-churn game never walks off the end of the pool.
+    targets[1] = .{}; // color_img.id = 0 → inactive
+    try std.testing.expectEqual(@as(u32, 1), pickSlot());
+
+    // Refill the hole, free the TAIL → reuse the tail hole.
+    targets[1].color_img.id = 9;
+    targets[2] = .{};
+    try std.testing.expectEqual(@as(u32, 2), pickSlot());
 }
