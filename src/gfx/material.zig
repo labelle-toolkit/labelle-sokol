@@ -443,9 +443,23 @@ const lut_registry = struct {
 
 /// Register a texture as a palette LUT and return its `aux_texture` handle
 /// (1-based; `0` is never returned). Pass the result as
-/// `MaterialUniforms.aux_texture` for a `palette_swap` draw. Idempotent-ish:
-/// returns 0 when the slot table is full (caller then gets a plain sprite).
+/// `MaterialUniforms.aux_texture` for a `palette_swap` draw.
+///
+/// IDEMPOTENT: re-registering an already-registered LUT returns the SAME handle
+/// rather than burning a new slot — a game that re-registers per frame or on
+/// asset reload can't exhaust the fixed table. Dedup is by the sokol view id
+/// (`lut.view.id`), the stable identifier of the GPU texture view. Only a
+/// genuinely-new LUT consumes a slot; returns `0` (→ plain-sprite degrade) once
+/// the table is full of DISTINCT LUTs.
 pub fn registerLut(lut: Texture) u32 {
+    // A zero/dead view can't be looked up later (`lut_registry.lookup` rejects
+    // `view.id == 0`), so never register it — signal degrade.
+    if (lut.view.id == 0) return 0;
+    // Dedup: return the existing 1-based handle if this view is already stored.
+    var i: u32 = 0;
+    while (i < lut_count) : (i += 1) {
+        if (lut_slots[i].view.id == lut.view.id) return i + 1;
+    }
     if (lut_count >= lut_slots.len) return 0;
     lut_slots[lut_count] = .{ .view = lut.view, .smp = lut.smp };
     lut_count += 1;
@@ -525,4 +539,29 @@ test "materialCapabilities advertises exactly flash + palette_swap" {
 
 test "MaterialFsParams matches the shader uniform block size (2x vec4)" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(MaterialFsParams));
+}
+
+test "registerLut is idempotent per view id; distinct views get distinct handles" {
+    // Isolate from any other test's registrations.
+    lut_count = 0;
+    const a = Texture{ .view = .{ .id = 42 } };
+    const b = Texture{ .view = .{ .id = 99 } };
+
+    const ha = registerLut(a);
+    try std.testing.expect(ha != 0);
+    // Re-registering the SAME view returns the SAME handle (no new slot).
+    try std.testing.expectEqual(ha, registerLut(a));
+    try std.testing.expectEqual(@as(u32, 1), lut_count);
+
+    // A DIFFERENT view gets a fresh handle.
+    const hb = registerLut(b);
+    try std.testing.expect(hb != ha and hb != 0);
+    try std.testing.expectEqual(@as(u32, 2), lut_count);
+    try std.testing.expectEqual(hb, registerLut(b));
+    try std.testing.expectEqual(@as(u32, 2), lut_count);
+
+    // A dead (id==0) view never registers → degrade signal.
+    try std.testing.expectEqual(@as(u32, 0), registerLut(Texture{ .view = .{ .id = 0 } }));
+
+    lut_count = 0; // leave global state clean for other tests
 }
