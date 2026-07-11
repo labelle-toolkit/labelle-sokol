@@ -86,11 +86,31 @@ pub const drawText = font_atlas.drawText;
 // carry a custom fragment shader). `registerLut` maps a LUT texture to the flat
 // `aux_texture` handle a `palette_swap` draw expects. `resetMaterials` /
 // `flushMaterials` are the per-frame lifecycle hooks driven by window.zig.
-pub const materialSupported = material.materialSupported;
-pub const drawTextureProMaterial = material.drawTextureProMaterial;
-pub const registerLut = material.registerLut;
-pub const resetMaterials = material.reset;
-pub const flushMaterials = material.flush;
+//
+// Version gate: the assembler UNIFIES the *game's* labelle-core onto every
+// backend module (backend_gfx included — see the Android build's single
+// `-Mlabelle-core` shared by `--dep labelle-core` on backend_gfx), so THIS
+// module must compile against whatever core the game pins, NOT this repo's own
+// pin. The material seam types (`MaterialEffect` / `Material` / `MaterialUniforms`)
+// only exist in core >= v1.25.0, so a game on an older core (e.g. an Android
+// example still on 1.24.0) would otherwise fail to resolve them and break the
+// build. `has_material` gates the whole seam: when the linked core predates it,
+// every re-export collapses to a no-op and `material.zig`'s body (which
+// references `core.backend_contract.MaterialEffect`) is never analyzed. A game
+// on an old core simply gets no materials — a quality degradation, never a
+// compile error. (bgfx does not gate today; it just isn't CI-built against an
+// old-core Android example that would trip it.)
+const core = @import("labelle-core");
+const has_material = @hasDecl(core.backend_contract, "MaterialEffect");
+pub const materialSupported = if (has_material) material.materialSupported else {};
+pub const drawTextureProMaterial = if (has_material) material.drawTextureProMaterial else {};
+pub const registerLut = if (has_material) material.registerLut else {};
+pub fn resetMaterials() void {
+    if (has_material) material.reset();
+}
+pub fn flushMaterials() void {
+    if (has_material) material.flush();
+}
 
 // ── Texture loading / decoding ─────────────────────────────────────────
 
