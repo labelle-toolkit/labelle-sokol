@@ -47,6 +47,13 @@
     // Mirrors labelle-bgfx v0.10.0's manifest field.
     .material_effects = .{ .flash, .palette_swap },
 
+    // Curated full-screen post-fx passes this backend implements (labelle-gfx#305
+    // Phase 3) — the `.capabilities` mirror of `core.postFxCapabilities(sokolImpl)`
+    // / the runtime `postPassSupported`. sokol implements ALL four built-ins
+    // (src/gfx/render_target.zig + post_fx_shaders.zig); backends with no shader
+    // dialect report false at runtime and the gfx `PostFxDriver` skips the pass.
+    .post_fx_passes = .{ .bloom, .vignette, .color_grade, .crt },
+
     // root_alias defaults to `backend_<name>`, so the generated root imports
     // these as `backend_gfx`/`backend_input`/… exactly as the enum path does.
     // Sources match the real repo layout (src/gfx.zig, src/input.zig,

@@ -11,7 +11,10 @@
 
     // Unify the app core onto `backend_gfx` (labelle-gfx#305). The sokol gfx
     // module imports `labelle-core` for the material-seam contract types
-    // (`MaterialEffect` / `Material` / `MaterialUniforms`, src/gfx/material.zig).
+    // (`MaterialEffect` / `Material` / `MaterialUniforms`, src/gfx/material.zig)
+    // AND the post-fx seam types (`PostPass` / `RenderTargetId`,
+    // src/gfx/render_target.zig) — both come from the SAME core, so this one
+    // override also unifies the render-target sub-surface + post-fx passes.
     // Without this override, `backend_gfx`'s core is the backend's PRIVATE
     // instance, nominally DISTINCT from the app's `core_mod` — so a game that
     // calls `drawTextureProMaterial` (whose `material` arg is the app core's

@@ -30,6 +30,7 @@ const texture = @import("gfx/texture.zig");
 const font_atlas = @import("gfx/font_atlas.zig");
 const font = @import("gfx/font.zig");
 const material = @import("gfx/material.zig");
+const render_target = @import("gfx/render_target.zig");
 
 // ── Backend types ──────────────────────────────────────────────────────
 
@@ -110,6 +111,56 @@ pub fn resetMaterials() void {
 }
 pub fn flushMaterials() void {
     if (has_material) material.flush();
+}
+
+// ── Render-target sub-surface + post-fx seam (labelle-gfx#305, Phase 3) ──────
+// Optional, gated on `@hasDecl(core.backend_contract, "PostPass")` (core >=
+// v1.26.0) exactly like the material seam above: a game on an older core simply
+// gets no render targets / post-fx (the whole stack becomes the straight-to-
+// backbuffer path in the gfx `PostFxDriver`), never a compile error. When gated
+// ON, gfx.zig re-exports render_target.zig's five render-target contract decls +
+// `applyPostPass`/`postPassSupported` so `core.Backend(Impl)` picks them up (all
+// five present ⇒ `hasRenderTargetSubSurface`), plus the window-facing per-frame
+// hooks the frame host drives (`resetRenderTargets` at beginFrame; the deferred
+// plan executed at flushScene). See src/gfx/render_target.zig for the deferred-
+// plan rationale (sokol passes can't nest + the single sgl flush).
+const has_post_fx = @hasDecl(core.backend_contract, "PostPass");
+// Re-export the contract value types so callers (goldens, the engine) name them
+// through `gfx.*` without importing labelle-core directly — mirroring the bgfx
+// backend. Gated: on an older core these resolve to `void`.
+pub const PostPass = if (has_post_fx) core.backend_contract.PostPass else void;
+pub const PostPassKind = if (has_post_fx) core.backend_contract.PostPassKind else void;
+pub const PostPassUniforms = if (has_post_fx) core.backend_contract.PostPassUniforms else void;
+pub const RenderTargetId = if (has_post_fx) core.backend_contract.RenderTargetId else void;
+/// The invalid render-target handle (`createRenderTarget` returns this on failure).
+pub const INVALID_RENDER_TARGET: if (has_post_fx) core.backend_contract.RenderTargetId else u32 = 0;
+pub const createRenderTarget = if (has_post_fx) render_target.createRenderTarget else {};
+pub const beginRenderTarget = if (has_post_fx) render_target.beginRenderTarget else {};
+pub const endRenderTarget = if (has_post_fx) render_target.endRenderTarget else {};
+pub const drawRenderTarget = if (has_post_fx) render_target.drawRenderTarget else {};
+pub const destroyRenderTarget = if (has_post_fx) render_target.destroyRenderTarget else {};
+pub const applyPostPass = if (has_post_fx) render_target.applyPostPass else {};
+pub const postPassSupported = if (has_post_fx) render_target.postPassSupported else {};
+
+/// Reset the per-frame post-fx plan. Driven by `window.beginFrame`.
+pub fn resetRenderTargets() void {
+    if (has_post_fx) render_target.resetFrame();
+}
+/// True when a post-fx redirection is armed this frame (`window.flushScene`).
+pub fn postFxActive() bool {
+    return if (has_post_fx) render_target.postFxActive() else false;
+}
+/// Open the offscreen scene pass (`window.flushScene`, before the sgl flush).
+pub fn beginPostFxScenePass() void {
+    if (has_post_fx) render_target.beginScenePass();
+}
+/// End the scene pass + run the queued post-fx pass chain (`window.flushScene`).
+pub fn endPostFxScenePassAndApply() void {
+    if (has_post_fx) render_target.endScenePassAndApply();
+}
+/// Composite the final target into the (reopened) backbuffer (`window.flushScene`).
+pub fn compositePostFx() void {
+    if (has_post_fx) render_target.compositePostFx();
 }
 
 // ── Texture loading / decoding ─────────────────────────────────────────

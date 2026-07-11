@@ -461,7 +461,7 @@ pub fn drawTextureProMaterial(
 // (it needs upload/unload lifetime wiring in texture.zig). `0` is reserved "none"
 // and always degrades.
 
-const LutEntry = struct { view: sg.View, smp: sg.Sampler };
+pub const LutEntry = struct { view: sg.View, smp: sg.Sampler };
 var lut_slots: [256]LutEntry = undefined;
 var lut_count: u32 = 0;
 
@@ -473,6 +473,14 @@ const lut_registry = struct {
         return e;
     }
 };
+
+/// Resolve a registered LUT handle (from `registerLut`) to its bindable
+/// view/sampler, or null for `0`/unknown. Shared with the post-fx seam
+/// (render_target.zig): the `color_grade` pass resolves its `aux_texture` LUT
+/// through the SAME registry a `palette_swap` material draw uses.
+pub fn lookupLut(id: u32) ?LutEntry {
+    return lut_registry.lookup(id);
+}
 
 /// Register a texture as a palette LUT and return its `aux_texture` handle
 /// (1-based; `0` is never returned). Pass the result as
