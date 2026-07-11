@@ -51,6 +51,7 @@ const SEEK_SET: c_int = 0;
 const SEEK_END: c_int = 2;
 extern "c" fn fseek(stream: *std.c.FILE, offset: c_long, whence: c_int) c_int;
 extern "c" fn ftell(stream: *std.c.FILE) c_long;
+extern "c" fn remove(path: [*:0]const u8) c_int;
 
 /// makePath-style: create the parent-dir chain of `base` so `takeScreenshot`'s
 /// `fopen(.., "wb")` can't fail on a clean checkout. Zig 0.16 dropped
@@ -208,34 +209,39 @@ pub fn main() void {
 
     const out_path = if (bless) GOLDEN_PATH else CANDIDATE_PATH;
     ensureParentDir(out_path);
-    // takeScreenshot reads back the headless offscreen color attachment and
-    // writes a 24-bit BMP. It logs + returns on failure (never crashes), so we
-    // detect success by reading the file back below.
+    // Remove any stale output UP FRONT. `takeScreenshot` only logs + returns on
+    // readback/write failure (never crashes), so if we didn't delete first a
+    // silent capture failure would leave a PRIOR run's file in place and the
+    // read-back below would treat it as a fresh capture → false pass. After the
+    // unlink, a successful `readFile(out_path)` proves the capture actually ran
+    // THIS invocation.
+    _ = remove(out_path.ptr);
     window.takeScreenshot(out_path);
     window.endHeadless();
 
-    if (bless) {
-        if (readFile(GOLDEN_PATH)) |g| {
-            std.heap.page_allocator.free(g);
-            std.debug.print("GOLDEN_RESULT: BLESSED {s}\n", .{GOLDEN_PATH});
-            std.process.exit(0);
-        }
-        std.debug.print("GOLDEN_RESULT: CAPTURE_FAILED (golden not written)\n", .{});
-        std.process.exit(3);
-    }
-
-    const candidate = readFile(CANDIDATE_PATH) orelse {
-        std.debug.print("GOLDEN_RESULT: CAPTURE_FAILED (candidate unreadable)\n", .{});
+    // Freshness gate: the file must exist now (only true if takeScreenshot wrote
+    // it, since we removed it above). Read it once and reuse for bless/compare.
+    const captured = readFile(out_path) orelse {
+        std.debug.print("GOLDEN_RESULT: CAPTURE_FAILED (no fresh capture at {s})\n", .{out_path});
         std.process.exit(3);
     };
-    defer std.heap.page_allocator.free(candidate);
+
+    defer std.heap.page_allocator.free(captured);
+
+    if (bless) {
+        // `captured` IS the freshly-written golden (out_path == GOLDEN_PATH).
+        std.debug.print("GOLDEN_RESULT: BLESSED {s}\n", .{GOLDEN_PATH});
+        std.process.exit(0);
+    }
+
+    // Check mode: `captured` is the fresh candidate; diff it against the golden.
     const golden = readFile(GOLDEN_PATH) orelse {
         std.debug.print("GOLDEN_RESULT: GOLDEN_MISSING (run: zig build material-golden-bless)\n", .{});
         std.process.exit(5);
     };
     defer std.heap.page_allocator.free(golden);
 
-    if (withinTolerance(golden, candidate)) {
+    if (withinTolerance(golden, captured)) {
         std.debug.print("GOLDEN_RESULT: OK\n", .{});
         std.process.exit(0);
     }

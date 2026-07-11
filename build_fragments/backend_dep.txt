@@ -9,6 +9,20 @@
     const backend_window = backend_dep.module("window");
     const sokol_clib = backend_dep.artifact("sokol_clib");
 
+    // Unify the app core onto `backend_gfx` (labelle-gfx#305). The sokol gfx
+    // module imports `labelle-core` for the material-seam contract types
+    // (`MaterialEffect` / `Material` / `MaterialUniforms`, src/gfx/material.zig).
+    // Without this override, `backend_gfx`'s core is the backend's PRIVATE
+    // instance, nominally DISTINCT from the app's `core_mod` — so a game that
+    // calls `drawTextureProMaterial` (whose `material` arg is the app core's
+    // `Material`) would NOT type-unify with the Impl's param type and fail to
+    // compile. Same core-diamond as the `sdl_gamepad`/`input` overrides below,
+    // now extended to gfx. `if` guard: gfx always imports core today, but keep
+    // the pattern symmetric + robust to an older backend build that doesn't.
+    if (backend_gfx.import_table.get("labelle-core")) |_| {
+        overrideImport(backend_gfx, "labelle-core", core_mod);
+    }
+
     // Unify the app core onto the transitive `sdl_gamepad` desktop gamepad
     // source — same diamond as `.backend_raylib` (see the note there). The
     // sokol `input` module reaches `GamepadEvent` through `sdl_gamepad`

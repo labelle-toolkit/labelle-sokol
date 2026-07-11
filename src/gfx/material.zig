@@ -49,14 +49,28 @@ const Material = core.backend_contract.Material;
 
 /// Effect-level capability gate consumed by `core.Backend(Impl)` and
 /// `core.materialCapabilities`. sokol implements `flash` + `palette_swap`;
-/// `dissolve` / `outline` are not yet implemented and degrade to a plain
-/// sprite. Advertising them here (rather than silently) lets a project that
-/// declares an unsupported effect surface it at resolve time.
+/// `dissolve` / `outline` are not yet implemented and degrade to a plain sprite.
+///
+/// Two-context honesty:
+///   - COMPTIME (the contract's `materialCapabilities` introspection, which
+///     evaluates this in a `comptime` block): report the STATIC capability —
+///     the effects this backend implements at all. It CANNOT call
+///     `sg.queryBackend()` (a runtime C call), and the manifest / capability
+///     mirror wants the backend-agnostic answer anyway.
+///   - RUNTIME (the per-draw `core.Backend(Impl)` gate): additionally require a
+///     shader dialect for the LIVE graphics backend. `pickSources()` returns
+///     null on `D3D11` / `WGPU` / `VULKAN` (no hand-authored dialect yet), so
+///     `flash`/`palette_swap` on those backends report FALSE — honest, rather
+///     than claiming support then silently degrading to a plain sprite.
 pub fn materialSupported(effect: MaterialEffect) bool {
-    return switch (effect) {
+    const implemented = switch (effect) {
         .flash, .palette_swap => true,
         .dissolve, .outline, .none => false,
     };
+    if (!implemented) return false;
+    if (@inComptime()) return true;
+    // Runtime: honest about the live backend's dialect availability.
+    return pickSources() != null;
 }
 
 // ── Vertex + uniform layout ─────────────────────────────────────────────────
@@ -238,6 +252,14 @@ fn ensureInitialized() bool {
     initialized = true;
 
     const srcs = pickSources() orelse {
+        // No hand-authored dialect for the live backend (D3D11/WGPU/Vulkan yet).
+        // `materialSupported` already reports false at runtime, but warn once in
+        // case a direct caller (a test / the golden) reaches here — so the
+        // degrade-to-plain-sprite is never SILENT.
+        std.log.warn(
+            "labelle-sokol: material effects unavailable on backend {s} (no shader dialect); drawing plain sprites",
+            .{@tagName(sg.queryBackend())},
+        );
         supported_backend = false;
         return false;
     };
@@ -422,11 +444,22 @@ pub fn drawTextureProMaterial(
 
 // ── LUT registry (maps a flat aux_texture handle → sokol view/sampler) ───────
 //
-// `MaterialUniforms.aux_texture` is a flat `u32` handle (contract shape). The
-// sokol `Texture` carries its `sg.View`/`sg.Sampler` inline (no global texture
-// pool like bgfx), so a caller that wants a palette LUT must register the LUT
-// texture here and pass the returned id as `aux_texture`. `0` is reserved
-// "none" and always degrades.
+// ⚠ KNOWN PORTABILITY GAP (labelle-gfx#305, slice-1, to reconcile in a follow-up):
+// the contract says `MaterialUniforms.aux_texture` is a backend TEXTURE HANDLE —
+// bgfx uses it as a direct texture-pool id, so a portable game sets
+// `aux_texture = lutTexture.id` and it "just works". sokol has NO global texture
+// pool: its `Texture` carries `sg.View`/`sg.Sampler` INLINE, and there is no
+// id→(view,sampler) reverse map, so a raw texture id can't be resolved to the
+// bindable handles a draw needs. As a bridge, a palette_swap caller on sokol must
+// FIRST call `gfx.registerLut(lutTexture)` and pass the returned 1-based handle as
+// `aux_texture`. That extra call is a sokol-specific divergence from the contract
+// — a game written straight to the contract (setting `aux_texture = lut.id`) will
+// degrade to a plain sprite on sokol (never crash: an unknown handle just misses
+// the registry). The clean fix (a follow-up) is a global texture registry
+// populated at `uploadTexture`/torn down at `unloadTexture`, so `aux_texture =
+// lut.id` resolves directly like bgfx; deferred here to keep this slice bounded
+// (it needs upload/unload lifetime wiring in texture.zig). `0` is reserved "none"
+// and always degrades.
 
 const LutEntry = struct { view: sg.View, smp: sg.Sampler };
 var lut_slots: [256]LutEntry = undefined;
