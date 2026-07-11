@@ -117,10 +117,23 @@ fn pickSlot() u32 {
 }
 
 /// Create an offscreen render target `w`×`h`. Returns a 1-based handle, or `0`
-/// (INVALID) on a bad size / pool exhaustion / sokol resource failure. BGRA8
-/// colour + DEPTH_STENCIL depth + sample_count 1 — byte-matching the swapchain /
-/// headless-fallback environment defaults, so the DEFAULT-format sgl / material /
-/// post-fx pipelines all draw into it without a format mismatch.
+/// (INVALID) on a bad size / pool exhaustion / sokol resource failure.
+///
+/// Colour/depth FORMAT comes from the live environment (P1 correctness): the
+/// sgl / material / post-fx pipelines all leave their colour/depth formats
+/// DEFAULT, so sokol resolves them from `sg.setup`'s environment defaults
+/// (`queryDesc().environment.defaults`). The render-target image MUST carry that
+/// SAME format or the pipeline↔attachment format check fails. On Metal the
+/// environment resolves to BGRA8 (what this used to hard-code, so this is a
+/// no-op there); on GLCORE/GLES3 the swapchain default is RGBA8, so hard-coding
+/// BGRA8 would have mismatched — query-from-env fixes GL/GLES. Fall back to
+/// BGRA8 / DEPTH_STENCIL if the environment ever reports `.DEFAULT`.
+///
+/// `sample_count = 1` is FORCED (P3): even when the app runs the swapchain at
+/// MSAA (environment sample_count > 1), post-fx targets are sampled as plain
+/// textures — a multisample colour image isn't directly sampleable without a
+/// resolve — so the offscreen targets (and the offscreen post-fx pipelines, see
+/// `makePipeline`) stay single-sample regardless of the swapchain's MSAA level.
 ///
 /// Slot reuse: a freed (inactive) slot is reused before the pool grows, so a game
 /// that dynamically creates/destroys render targets does NOT exhaust the pool via
@@ -138,18 +151,26 @@ pub fn createRenderTarget(w: u16, h: u16) RenderTargetId {
         return 0;
     }
 
+    // Match the live environment's colour/depth formats so the DEFAULT-format
+    // pipelines draw into this target without a format mismatch (see doc above).
+    const env = sg.queryDesc().environment.defaults;
+    const color_fmt: sg.PixelFormat = if (env.color_format == .DEFAULT) .BGRA8 else env.color_format;
+    const depth_fmt: sg.PixelFormat = if (env.depth_format == .DEFAULT) .DEPTH_STENCIL else env.depth_format;
+
     var rt: RenderTarget = .{ .width = w, .height = h };
     rt.color_img = sg.makeImage(.{
         .width = w,
         .height = h,
-        .pixel_format = .BGRA8,
+        .pixel_format = color_fmt,
+        .sample_count = 1, // forced single-sample — post-fx samples this as a texture
         .usage = .{ .color_attachment = true, .immutable = true },
     });
     if (rt.color_img.id == 0) return 0;
     rt.depth_img = sg.makeImage(.{
         .width = w,
         .height = h,
-        .pixel_format = .DEPTH_STENCIL,
+        .pixel_format = depth_fmt,
+        .sample_count = 1, // must match the colour attachment's sample_count
         .usage = .{ .depth_stencil_attachment = true, .immutable = true },
     });
     if (rt.depth_img.id == 0) {
@@ -252,6 +273,18 @@ pub fn applyPostPass(pass: PostPass, src: RenderTargetId, dst: RenderTargetId) v
 /// Composite render target `id` into the backbuffer at `dest` (SCREEN space,
 /// top-left, Y-down, pixels), modulated by `tint`. During a post-fx frame this is
 /// the FINAL blit; it is recorded and executed after the pass chain.
+///
+/// v1 LIMITATION (P4, deferred model): this only composites WITHIN an active
+/// post-fx plan (between `beginRenderTarget` and `window.flushScene`) — the
+/// no-op guard below. It is recorded into the per-frame plan and drawn at
+/// `flushScene`, so a caller that produced a target in an EARLIER frame and
+/// wants to composite it standalone (no active plan) is NOT supported today:
+/// there is no armed plan for `flushScene` to execute, and drawing immediately
+/// would need to open the lazily-deferred backbuffer pass out of band (see
+/// `window.flushScene`/`ensureBackbufferPass`). The only consumer — the gfx
+/// `PostFxDriver` — always calls `beginRenderTarget` first, so the standalone
+/// path is unexercised. If a future feature needs it, wire a window-side
+/// "composite-only" seam rather than compositing inline here.
 pub fn drawRenderTarget(id: RenderTargetId, dest: Rectangle, tint: Color) void {
     if (!plan_active) return;
     if (!validId(id)) return;
@@ -271,6 +304,15 @@ pub fn postFxActive() bool {
 /// Open the offscreen pass the scene rasterises into (CLEAR to the standard
 /// backdrop). `window.flushScene` calls this, then `sgl.draw()` + `flushMaterials()`
 /// while it is the active pass, then `endScenePassAndApply`.
+/// MSAA caveat (P3): the scene target is single-sample, and the post-fx pass
+/// pipelines are forced single-sample to match. The scene itself, however, is
+/// drawn here by sokol_gl + the material seam, whose pipelines still resolve
+/// their sample_count from the environment. On a NON-MSAA swapchain everything
+/// is single-sample and consistent (the only configuration the goldens cover).
+/// Under swapchain MSAA the sgl/material pipelines would need single-sample
+/// variants when redirected into an RT — a broader change outside the post-fx
+/// seam, tracked as a follow-up; forcing the RT + post-fx pipelines to 1 here is
+/// the post-fx-owned half of that fix.
 pub fn beginScenePass() void {
     const rt = targets[scene_target - 1];
     var action: sg.PassAction = .{};
@@ -371,18 +413,41 @@ fn makeParams(pass: PostPass, w: u16, h: u16) PostFxParams {
 
 const PostVertex = extern struct { x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32 };
 
-// The constant full-screen quad (NDC -1..1, UV 0..1, white), matching bgfx's
-// `fullscreenQuad`: NDC-top(+1) → v=0 so a plain sample of a top-left-origin
-// render-target texture writes an upright copy. Immutable → uploaded once, reused
-// by every post-fx pass and the opaque degrade blit.
-const fullscreen_verts = [6]PostVertex{
-    .{ .x = -1, .y = 1, .u = 0, .v = 0, .r = 1, .g = 1, .b = 1, .a = 1 }, // TL
-    .{ .x = 1, .y = 1, .u = 1, .v = 0, .r = 1, .g = 1, .b = 1, .a = 1 }, // TR
-    .{ .x = 1, .y = -1, .u = 1, .v = 1, .r = 1, .g = 1, .b = 1, .a = 1 }, // BR
-    .{ .x = -1, .y = 1, .u = 0, .v = 0, .r = 1, .g = 1, .b = 1, .a = 1 }, // TL
-    .{ .x = 1, .y = -1, .u = 1, .v = 1, .r = 1, .g = 1, .b = 1, .a = 1 }, // BR
-    .{ .x = -1, .y = -1, .u = 0, .v = 1, .r = 1, .g = 1, .b = 1, .a = 1 }, // BL
-};
+// The full-screen quad (NDC -1..1, UV 0..1, white), matching bgfx's
+// `fullscreenQuad`. On a TOP-LEFT-origin backend (Metal/D3D) NDC-top(+1) → v=0,
+// so a plain sample of a render-target texture writes an upright copy and each
+// offscreen post-fx pass is memory-preserving.
+//
+// P2 (GL/GLES correctness): on a BOTTOM-LEFT-origin backend (GLCORE/GLES3) a
+// render-target's texel row 0 is the BOTTOM, so sampling v=0 at NDC-top would
+// vertically FLIP each pass — an ODD-length pass stack (e.g. a lone vignette)
+// then samples upside-down. `fullscreenVerts(flip_v)` flips the sampled V on
+// those backends so every offscreen pass stays memory-preserving (parity no
+// longer matters), exactly like Metal; the final composite's own GL flip
+// (`drawTextureQuad`) then handles the one backbuffer-orientation correction.
+// This mirrors the fix codex flagged on bgfx (the caps `originBottomLeft`
+// V-flip). Metal (top-left → flip_v=false) is byte-identical to before.
+// Immutable → uploaded once, reused by every post-fx pass and the opaque blit.
+fn fullscreenVerts(flip_v: bool) [6]PostVertex {
+    const v_top: f32 = if (flip_v) 1 else 0;
+    const v_bot: f32 = if (flip_v) 0 else 1;
+    return .{
+        .{ .x = -1, .y = 1, .u = 0, .v = v_top, .r = 1, .g = 1, .b = 1, .a = 1 }, // TL
+        .{ .x = 1, .y = 1, .u = 1, .v = v_top, .r = 1, .g = 1, .b = 1, .a = 1 }, // TR
+        .{ .x = 1, .y = -1, .u = 1, .v = v_bot, .r = 1, .g = 1, .b = 1, .a = 1 }, // BR
+        .{ .x = -1, .y = 1, .u = 0, .v = v_top, .r = 1, .g = 1, .b = 1, .a = 1 }, // TL
+        .{ .x = 1, .y = -1, .u = 1, .v = v_bot, .r = 1, .g = 1, .b = 1, .a = 1 }, // BR
+        .{ .x = -1, .y = -1, .u = 0, .v = v_bot, .r = 1, .g = 1, .b = 1, .a = 1 }, // BL
+    };
+}
+
+/// True on backends whose render-target textures are BOTTOM-LEFT origin
+/// (GLCORE/GLES3). Drives both the offscreen post-fx V-flip (`fullscreenVerts`)
+/// and the composite V-flip (`drawTextureQuad`). sokol reports this via
+/// `queryFeatures().origin_top_left`.
+fn originBottomLeft() bool {
+    return !sg.queryFeatures().origin_top_left;
+}
 
 /// Bind `tex`/`smp` (+ optional `lut`) and draw the immutable full-screen quad
 /// through `pip`. sokol requires the strict order applyPipeline → applyBindings →
@@ -413,10 +478,7 @@ fn drawFullscreen(pip: sg.Pipeline, tex: sg.View, smp: sg.Sampler, lut: ?materia
 /// render-target textures are bottom-left origin, so V is flipped there to keep
 /// the composited image upright; Metal / D3D sample straight.
 fn drawTextureQuad(pip: sg.Pipeline, tex: sg.View, smp: sg.Sampler, dest: Rectangle, tint: Color, flip_gl_v: bool) void {
-    const flip = flip_gl_v and switch (sg.queryBackend()) {
-        .GLCORE, .GLES3 => true,
-        else => false,
-    };
+    const flip = flip_gl_v and originBottomLeft();
     const x0 = state.toNdcX(dest.x);
     const y0 = state.toNdcY(dest.y);
     const x1 = state.toNdcX(dest.x + dest.width);
@@ -542,7 +604,14 @@ fn makeShader(srcs: ShaderSources, fs: [*c]const u8, label: [*c]const u8, opts: 
     return sg.makeShader(desc);
 }
 
-fn makePipeline(shader: sg.Shader, blend: bool) sg.Pipeline {
+/// Build a post-fx pipeline. `offscreen` pipelines (the pass chain + the opaque
+/// degrade blit) draw into single-sample render targets, so their sample_count is
+/// FORCED to 1 (P3) to stay compatible under swapchain MSAA — matching the RT
+/// images in `createRenderTarget`. The composite blit (`offscreen = false`) draws
+/// into the backbuffer, so it leaves sample_count DEFAULT and sokol resolves it
+/// from the environment (== the swapchain's MSAA level). On a non-MSAA swapchain
+/// both resolve to 1, so `offscreen = true` is a no-op there (incl. Metal golden).
+fn makePipeline(shader: sg.Shader, blend: bool, offscreen: bool) sg.Pipeline {
     var pdesc: sg.PipelineDesc = .{};
     pdesc.shader = shader;
     pdesc.label = "postfx-pipeline";
@@ -551,10 +620,12 @@ fn makePipeline(shader: sg.Shader, blend: bool) sg.Pipeline {
     pdesc.layout.attrs[1] = .{ .format = .FLOAT2, .offset = 8 };
     pdesc.layout.attrs[2] = .{ .format = .FLOAT4, .offset = 16 };
     pdesc.layout.buffers[0].stride = @sizeOf(PostVertex);
-    // Colour/depth formats + sample count left DEFAULT so sokol resolves them
-    // from the environment (BGRA8 / DEPTH_STENCIL / 1) — the SAME formats the
-    // render targets carry, so the pipeline draws into offscreen RTs and the
-    // backbuffer alike (exactly the material seam's approach).
+    // Colour/depth FORMATS left DEFAULT so sokol resolves them from the
+    // environment — the SAME formats the render targets now carry (they query the
+    // same environment in `createRenderTarget`), so the pipeline draws into
+    // offscreen RTs and the backbuffer alike. SAMPLE COUNT: offscreen → 1 (RTs are
+    // single-sample); composite → DEFAULT (matches the backbuffer/swapchain MSAA).
+    if (offscreen) pdesc.sample_count = 1;
     if (blend) {
         pdesc.colors[0].blend = .{
             .enabled = true,
@@ -583,9 +654,13 @@ fn ensureInitialized() bool {
         return false;
     };
 
+    // Build the immutable full-screen quad with the sampled V flipped on
+    // bottom-left-origin backends (GL/GLES) so each offscreen pass is
+    // memory-preserving there — see `fullscreenVerts` (P2).
+    const fs_verts = fullscreenVerts(originBottomLeft());
     fullscreen_vbuf = sg.makeBuffer(.{
         .usage = .{ .vertex_buffer = true, .immutable = true },
-        .data = sg.asRange(&fullscreen_verts),
+        .data = sg.asRange(&fs_verts),
         .label = "postfx-fullscreen-vbuf",
     });
     composite_vbuf = sg.makeBuffer(.{
@@ -621,12 +696,14 @@ fn ensureInitialized() bool {
     const shd_crt = shaders_arr[3];
     const shd_blit = shaders_arr[4];
 
-    bloom_pip = makePipeline(shd_bloom, false);
-    vignette_pip = makePipeline(shd_vignette, false);
-    color_grade_pip = makePipeline(shd_color_grade, false);
-    crt_pip = makePipeline(shd_crt, false);
-    blit_opaque_pip = makePipeline(shd_blit, false);
-    blit_blend_pip = makePipeline(shd_blit, true);
+    // Offscreen pass pipelines (single-sample RTs, P3) vs the composite blit
+    // (backbuffer, DEFAULT sample count == swapchain MSAA).
+    bloom_pip = makePipeline(shd_bloom, false, true);
+    vignette_pip = makePipeline(shd_vignette, false, true);
+    color_grade_pip = makePipeline(shd_color_grade, false, true);
+    crt_pip = makePipeline(shd_crt, false, true);
+    blit_opaque_pip = makePipeline(shd_blit, false, true);
+    blit_blend_pip = makePipeline(shd_blit, true, false);
     const pips_arr = [_]sg.Pipeline{ bloom_pip, vignette_pip, color_grade_pip, crt_pip, blit_opaque_pip, blit_blend_pip };
     for (pips_arr) |p| {
         if (p.id == 0) {
