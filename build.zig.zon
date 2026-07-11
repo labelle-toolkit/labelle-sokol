@@ -30,8 +30,8 @@
         // the udev/evdev gamepad STATE source (gamepad_source.Source.update/
         // isButtonDown/…, which landed in v1.16.0; v1.15.0 was detection-only).
         .labelle_core = .{
-            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.22.0.tar.gz",
-            .hash = "labelle_core-1.22.0-OauRcMkFBgCFj-reWQnyVqtZBYsfbSFQkHY971oQduWl",
+            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.26.0.tar.gz",
+            .hash = "labelle_core-1.26.0-OauRcDwJBwDfNc5x2S_FBwPrTztNUb_8Ie4HSq8XUoAM",
         },
         .sokol = .{
             // ⚠ LOCKSTEP: this commit MUST equal labelle-imgui's sokol

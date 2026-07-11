@@ -29,6 +29,7 @@ const draw = @import("gfx/draw.zig");
 const texture = @import("gfx/texture.zig");
 const font_atlas = @import("gfx/font_atlas.zig");
 const font = @import("gfx/font.zig");
+const material = @import("gfx/material.zig");
 
 // ── Backend types ──────────────────────────────────────────────────────
 
@@ -76,6 +77,40 @@ pub const drawTriangle = draw.drawTriangle;
 pub const drawPolygon = draw.drawPolygon;
 pub const drawLine = draw.drawLine;
 pub const drawText = font_atlas.drawText;
+
+// ── Material seam (labelle-gfx#305, Phase 3 sokol parity slice 1) ───────
+// Optional, `@hasDecl`-gated on the `core.Backend(Impl)` wrapper: per-sprite
+// curated shader effects (`flash`, `palette_swap`). `materialSupported` is the
+// effect-level capability gate; `drawTextureProMaterial` is the material-aware
+// draw. See src/gfx/material.zig for the raw-sokol_gfx rationale (sokol_gl can't
+// carry a custom fragment shader). `registerLut` maps a LUT texture to the flat
+// `aux_texture` handle a `palette_swap` draw expects. `resetMaterials` /
+// `flushMaterials` are the per-frame lifecycle hooks driven by window.zig.
+//
+// Version gate: the assembler UNIFIES the *game's* labelle-core onto every
+// backend module (backend_gfx included — see the Android build's single
+// `-Mlabelle-core` shared by `--dep labelle-core` on backend_gfx), so THIS
+// module must compile against whatever core the game pins, NOT this repo's own
+// pin. The material seam types (`MaterialEffect` / `Material` / `MaterialUniforms`)
+// only exist in core >= v1.25.0, so a game on an older core (e.g. an Android
+// example still on 1.24.0) would otherwise fail to resolve them and break the
+// build. `has_material` gates the whole seam: when the linked core predates it,
+// every re-export collapses to a no-op and `material.zig`'s body (which
+// references `core.backend_contract.MaterialEffect`) is never analyzed. A game
+// on an old core simply gets no materials — a quality degradation, never a
+// compile error. (bgfx does not gate today; it just isn't CI-built against an
+// old-core Android example that would trip it.)
+const core = @import("labelle-core");
+const has_material = @hasDecl(core.backend_contract, "MaterialEffect");
+pub const materialSupported = if (has_material) material.materialSupported else {};
+pub const drawTextureProMaterial = if (has_material) material.drawTextureProMaterial else {};
+pub const registerLut = if (has_material) material.registerLut else {};
+pub fn resetMaterials() void {
+    if (has_material) material.reset();
+}
+pub fn flushMaterials() void {
+    if (has_material) material.flush();
+}
 
 // ── Texture loading / decoding ─────────────────────────────────────────
 

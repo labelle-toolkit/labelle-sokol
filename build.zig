@@ -164,6 +164,14 @@ pub fn build(b: *std.Build) void {
     gfx_mod.addImport("sokol", sokol_mod);
     gfx_mod.addIncludePath(b.path("src"));
 
+    // labelle-core: the material seam (labelle-gfx#305, src/gfx/material.zig)
+    // uses the contract's `MaterialEffect` / `MaterialUniforms` / `Material`
+    // value types — exactly as the bgfx backend does — so the gfx module now
+    // carries a core import. Shared with input/window below.
+    const gfx_core_dep = b.dependency("labelle_core", .{ .target = target, .optimize = optimize });
+    const gfx_core_mod = gfx_core_dep.module("labelle-core");
+    gfx_mod.addImport("labelle-core", gfx_core_mod);
+
     // When cross-compiling to wasm32-emscripten the C compile of
     // `stb_image_impl.c` cannot find `<stdlib.h>` / `<stdio.h>`
     // because Zig does not ship libc headers for `wasm32-emscripten`
@@ -332,6 +340,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     window_mod.addImport("sokol", sokol_mod);
+    // The window frame host drives the gfx material seam's per-frame lifecycle
+    // (labelle-gfx#305), so it imports the SAME gfx module instance the game
+    // imports — module-level material-queue state is shared.
+    window_mod.addImport("gfx", gfx_mod);
 
     // ── Re-export the native artifact so consumers can link it ──────
     b.installArtifact(sokol_clib);
@@ -446,4 +458,57 @@ pub fn build(b: *std.Build) void {
     // input.zig's pure keyboard-edge tests (back-key policy + the #263
     // key-repeat regression) call no sokol API, so run them natively too.
     test_host_step.dependOn(&b.addRunArtifact(input_compile_check).step);
+
+    // ── Material golden harness (labelle-gfx#305, Phase 3 sokol slice 1) ─────
+    // `zig build material-golden`       — render the FIXED flash + palette_swap
+    //     scene surfaceless-headless and DIFF it against the committed golden BMP.
+    // `zig build material-golden-bless` — regenerate + overwrite the golden.
+    //
+    // macOS-only: the headless path is raw-Metal (`window.beginHeadless` →
+    // `MTLCreateSystemDefaultDevice`), which only links/resolves on Darwin. On a
+    // non-macOS host the step is simply absent. The exe links `sokol_clib` (which
+    // carries the Metal/QuartzCore framework links) + the gfx/window modules.
+    if (target.result.os.tag == .macos) {
+        const MaterialGolden = struct {
+            fn make(
+                bb: *std.Build,
+                t: std.Build.ResolvedTarget,
+                o: std.builtin.OptimizeMode,
+                smod: *std.Build.Module,
+                gmod: *std.Build.Module,
+                wmod: *std.Build.Module,
+                clib: *std.Build.Step.Compile,
+                bless: bool,
+            ) *std.Build.Step.Run {
+                const opts = bb.addOptions();
+                opts.addOption(bool, "bless", bless);
+                const exe = bb.addExecutable(.{
+                    .name = if (bless) "material_golden_bless" else "material_golden",
+                    .root_module = bb.createModule(.{
+                        .root_source_file = bb.path("src/material_golden.zig"),
+                        .target = t,
+                        .optimize = o,
+                        .link_libc = true,
+                    }),
+                });
+                exe.root_module.addImport("sokol", smod);
+                exe.root_module.addImport("gfx", gmod);
+                exe.root_module.addImport("window", wmod);
+                exe.root_module.addImport("golden_options", opts.createModule());
+                exe.root_module.linkLibrary(clib);
+                const run = bb.addRunArtifact(exe);
+                // Render/diff writes into the checkout — run from the project root.
+                run.setCwd(bb.path("."));
+                return run;
+            }
+        };
+
+        const golden_check = MaterialGolden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, sokol_clib, false);
+        const golden_step = b.step("material-golden", "Diff the material flash + palette_swap scene against the committed golden (#305)");
+        golden_step.dependOn(&golden_check.step);
+
+        const golden_bless = MaterialGolden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, sokol_clib, true);
+        const golden_bless_step = b.step("material-golden-bless", "Regenerate the material golden BMP (#305)");
+        golden_bless_step.dependOn(&golden_bless.step);
+    }
 }

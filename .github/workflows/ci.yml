@@ -34,6 +34,16 @@ jobs:
       - name: Build + test
         run: zig build test
 
+      # Material seam golden (labelle-gfx#305): render the fixed flash +
+      # palette_swap scene surfaceless-headless (raw Metal, no GUI session) and
+      # diff it against the committed golden BMP. macOS-only — the headless path
+      # is Metal (`window.beginHeadless`); the step doesn't exist on the Linux
+      # leg. Regenerate with `zig build material-golden-bless` after an
+      # intentional shader change.
+      - name: Material golden (macOS)
+        if: runner.os == 'macOS'
+        run: zig build material-golden
+
   # Integration: generate + build the sokol desktop example (which now lives HERE,
   # not in labelle-assembler — the backend-agnosticism remainder, assembler#520).
   # Verifies the sokol backend works end-to-end through the toolkit against THIS

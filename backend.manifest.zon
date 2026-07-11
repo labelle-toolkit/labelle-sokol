@@ -41,4 +41,16 @@
         .ios,
         .audio_ogg,
     },
+
+    // Curated material effects this backend implements (labelle-gfx#305, the
+    // `.capabilities` mirror of `core.materialCapabilities(sokolImpl)` / the
+    // runtime `materialSupported`). Advertised as DATA so a project declaring an
+    // unsupported effect can surface at generate/resolve time rather than
+    // silently degrading per-frame. sokol implements `flash` + `palette_swap`
+    // (src/gfx/material.zig `materialSupported` + `drawTextureProMaterial`);
+    // `dissolve` / `outline` are not yet implemented and degrade to a plain
+    // sprite. The assembler parses manifests with `ignore_unknown_fields =
+    // true`, so this forward-looking field is inert until the resolve-side
+    // mirror lands. Mirrors labelle-bgfx v0.10.0's manifest field.
+    .material_effects = .{ .flash, .palette_swap },
 }
