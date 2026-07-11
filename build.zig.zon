@@ -1,7 +1,7 @@
 .{
     .fingerprint = 0x312df839bf864b91,
     .name = .labelle_sokol,
-    .version = "0.2.1",
+    .version = "0.3.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // Shared windowless-SDL desktop gamepad source (core#28). In-tree
