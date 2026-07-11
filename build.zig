@@ -469,7 +469,24 @@ pub fn build(b: *std.Build) void {
     // non-macOS host the step is simply absent. The exe links `sokol_clib` (which
     // carries the Metal/QuartzCore framework links) + the gfx/window modules.
     if (target.result.os.tag == .macos) {
-        const MaterialGolden = struct {
+        // ── labelle-gfx (TEST/GOLDEN-ONLY) — the real backend-agnostic gfx
+        // library, pulled in ONLY to drive its `PostFxDriver` over THIS sokol
+        // backend in the post-fx INTEGRATION golden. gfx deps `labelle-core`,
+        // sokol deps `labelle-core`, and labelle-gfx is BACKEND-AGNOSTIC (deps
+        // core, NOT sokol), so there is no cycle. We MUST override labelle-gfx's
+        // own `labelle-core` onto the sokol backend's core module (`gfx_core_mod`,
+        // v1.26.0) so the diamond unifies at the SOURCE level — otherwise
+        // `PostPass`/`RenderTargetId` from gfx's core instance would not type-check
+        // against the sokol backend's core instance and `PostFxDriver(gfx)`
+        // wouldn't compile (the same core-unify seam the material seam added).
+        // Lazy → only fetched when this macOS golden target is actually built.
+        const gfx_lib_mod: ?*std.Build.Module = if (b.lazyDependency("labelle_gfx", .{ .target = target, .optimize = optimize })) |dep| blk: {
+            const m = dep.module("labelle-gfx");
+            m.addImport("labelle-core", gfx_core_mod); // unify the core diamond onto sokol's pin
+            break :blk m;
+        } else null;
+
+        const Golden = struct {
             fn make(
                 bb: *std.Build,
                 t: std.Build.ResolvedTarget,
@@ -477,15 +494,18 @@ pub fn build(b: *std.Build) void {
                 smod: *std.Build.Module,
                 gmod: *std.Build.Module,
                 wmod: *std.Build.Module,
+                gfx_lib_m: ?*std.Build.Module, // non-null only for the integration golden
                 clib: *std.Build.Step.Compile,
+                name: []const u8,
+                src: []const u8,
                 bless: bool,
             ) *std.Build.Step.Run {
                 const opts = bb.addOptions();
                 opts.addOption(bool, "bless", bless);
                 const exe = bb.addExecutable(.{
-                    .name = if (bless) "material_golden_bless" else "material_golden",
+                    .name = bb.fmt("{s}{s}", .{ name, if (bless) "_bless" else "" }),
                     .root_module = bb.createModule(.{
-                        .root_source_file = bb.path("src/material_golden.zig"),
+                        .root_source_file = bb.path(src),
                         .target = t,
                         .optimize = o,
                         .link_libc = true,
@@ -494,6 +514,7 @@ pub fn build(b: *std.Build) void {
                 exe.root_module.addImport("sokol", smod);
                 exe.root_module.addImport("gfx", gmod);
                 exe.root_module.addImport("window", wmod);
+                if (gfx_lib_m) |glm| exe.root_module.addImport("labelle-gfx", glm);
                 exe.root_module.addImport("golden_options", opts.createModule());
                 exe.root_module.linkLibrary(clib);
                 const run = bb.addRunArtifact(exe);
@@ -503,12 +524,35 @@ pub fn build(b: *std.Build) void {
             }
         };
 
-        const golden_check = MaterialGolden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, sokol_clib, false);
+        const golden_check = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "material_golden", "src/material_golden.zig", false);
         const golden_step = b.step("material-golden", "Diff the material flash + palette_swap scene against the committed golden (#305)");
         golden_step.dependOn(&golden_check.step);
 
-        const golden_bless = MaterialGolden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, sokol_clib, true);
+        const golden_bless = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "material_golden", "src/material_golden.zig", true);
         const golden_bless_step = b.step("material-golden-bless", "Regenerate the material golden BMP (#305)");
         golden_bless_step.dependOn(&golden_bless.step);
+
+        // ── Post-fx golden (bloom→crt, DIRECT applyPostPass) — pins the shaders ──
+        const pfx_check = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "post_fx_golden", "src/post_fx_golden.zig", false);
+        const pfx_step = b.step("post-fx-golden", "Diff the bloom+crt post-fx stack against the committed golden (#305)");
+        pfx_step.dependOn(&pfx_check.step);
+
+        const pfx_bless = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "post_fx_golden", "src/post_fx_golden.zig", true);
+        const pfx_bless_step = b.step("post-fx-golden-bless", "Regenerate the post-fx golden BMP (#305)");
+        pfx_bless_step.dependOn(&pfx_bless.step);
+
+        // ── Post-fx INTEGRATION golden (drives the REAL gfx PostFxDriver) ────────
+        // The integration proof: exercises the driver's begin/applyPostPass/resolve
+        // ping-pong through sokol's DEFERRED plan (executed at flushScene). Diffed
+        // against the reference golden `post_fx_golden` blesses. Needs labelle-gfx.
+        if (gfx_lib_mod) |gfx_lib_m| {
+            const int_check = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, gfx_lib_m, sokol_clib, "post_fx_integration_golden", "src/post_fx_integration_golden.zig", false);
+            const int_step = b.step("post-fx-integration-golden", "Drive the REAL gfx PostFxDriver over sokol (bloom→crt) and diff against the reference golden (#305)");
+            int_step.dependOn(&int_check.step);
+
+            const int_bless = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, gfx_lib_m, sokol_clib, "post_fx_integration_golden", "src/post_fx_integration_golden.zig", true);
+            const int_bless_step = b.step("post-fx-integration-golden-bless", "Regenerate the integration golden BMP (#305)");
+            int_bless_step.dependOn(&int_bless.step);
+        }
     }
 }

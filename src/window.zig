@@ -426,8 +426,9 @@ pub fn beginFrame() sg.PassAction {
     // sgl.defaults() resets to the default non-blended pipeline; load our
     // alpha-blended pipeline so sprites render transparency correctly.
     sgl.loadPipeline(alpha_pipeline);
-    // Drop last frame's queued material sprites (labelle-gfx#305).
+    // Drop last frame's queued material sprites + post-fx plan (labelle-gfx#305).
     gfx.resetMaterials();
+    gfx.resetRenderTargets();
     var pass_action: sg.PassAction = .{};
     pass_action.colors[0] = .{
         .load_action = .CLEAR,
@@ -467,7 +468,44 @@ pub fn clearEditorRenderTarget() void {
     current_editor_render_target = null;
 }
 
+/// The pass action `beginPass` last recorded — stashed so `flushScene` /
+/// `endFrame` can open the backbuffer with the intended clear.
+var last_pass_action: sg.PassAction = .{};
+
+/// The backbuffer pass is opened LAZILY (labelle-gfx#305, Phase 3). `beginPass`
+/// only RECORDS the action; the actual `sg.beginPass` fires on the first thing
+/// that needs the backbuffer (`flushScene` or `endFrame`). This is what lets the
+/// post-fx path run its offscreen scene + ping-pong passes FIRST — sokol passes
+/// can't nest, so the backbuffer must not already be open — and then open the
+/// backbuffer EXACTLY ONCE for the composite. Opening it twice per frame (an
+/// empty pass then the composite) broke the headless screenshot readback, whose
+/// double-buffered attachment slot then pointed at the empty first pass. Every
+/// render path (plain, material, post-fx) now opens the backbuffer exactly once.
+///
+/// Safe because nothing draws to the backbuffer between `beginPass` and
+/// `flushScene`: all sprites/shapes/gizmos ride sokol_gl (drained at
+/// `flushScene`) and materials are queued (replayed at `flushScene`).
+var backbuffer_pass_pending: bool = false;
+
 pub fn beginPass(pass_action: sg.PassAction) void {
+    last_pass_action = pass_action;
+    backbuffer_pass_pending = true;
+}
+
+/// Open the backbuffer pass now if `beginPass` recorded one and it isn't open
+/// yet. Idempotent within a frame. Called by `flushScene` (normal path + the
+/// post-fx composite) and defensively by `endFrame`.
+fn ensureBackbufferPass() void {
+    if (!backbuffer_pass_pending) return;
+    backbuffer_pass_pending = false;
+    beginBackbufferPass(last_pass_action);
+}
+
+/// Open the backbuffer pass — the editor render target, the headless offscreen
+/// fallback, or the real swapchain (in that priority). Factored out of `beginPass`
+/// so `ensureBackbufferPass` (and the post-fx `flushScene` path) can open the
+/// backbuffer after the offscreen scene + pass chain (see `flushScene`).
+fn beginBackbufferPass(pass_action: sg.PassAction) void {
     if (current_editor_render_target) |attachments| {
         sg.beginPass(.{ .action = pass_action, .attachments = attachments });
         return;
@@ -591,6 +629,32 @@ pub fn headlessColorTexture() ?*const anyopaque {
 /// since draws are layered in submission order, the sprites painted on
 /// top of the GUI and hid it entirely. See labelle-toolkit/labelle-imgui#4.
 pub fn flushScene() void {
+    // ── Post-fx path (labelle-gfx#305, Phase 3) ─────────────────────────────
+    // When the gfx `PostFxDriver` armed a redirection this frame, the scene must
+    // land in an offscreen target, run through the post-fx pass chain, and only
+    // THEN composite to the backbuffer. sokol can't nest passes and sokol_gl
+    // flushes exactly once, so we orchestrate the whole thing HERE — the single
+    // sgl-flush seam. The gfx side owns the offscreen passes + pipelines; window
+    // owns the sgl flush + the backbuffer routing (see gfx/render_target.zig).
+    if (gfx.postFxActive()) {
+        // The backbuffer pass is NOT open yet (lazy — see `backbuffer_pass_pending`),
+        // so we can open the offscreen scene target directly (sokol passes can't
+        // nest). Scene (sgl + materials) → the offscreen scene target.
+        gfx.beginPostFxScenePass();
+        sgl.draw();
+        gfx.flushMaterials();
+        // End the scene pass + run the ping-pong post-fx passes (each its own
+        // offscreen pass; submission order == execution order on sokol).
+        gfx.endPostFxScenePassAndApply();
+        // Now open the backbuffer ONCE and composite the final target into it.
+        // Left OPEN for the GUI + `endFrame`, exactly like the straight path below.
+        ensureBackbufferPass();
+        gfx.compositePostFx();
+        return;
+    }
+
+    // Normal path: open the backbuffer (lazy) and drain the scene into it.
+    ensureBackbufferPass();
     sgl.draw();
     // Replay queued material sprites (labelle-gfx#305) immediately AFTER the
     // sokol_gl batch so they composite on top of it. Must be inside the active
@@ -606,6 +670,11 @@ pub fn endFrame() void {
     // `sgl_draw`), painting the sprites a second time on top of any
     // GUI submitted between the two flushes — which is exactly the
     // labelle-imgui#4 symptom this split fixes.
+    //
+    // Defensive: if a frame opened `beginPass` but never reached `flushScene`
+    // (so the backbuffer pass is still pending — lazy open, labelle-gfx#305),
+    // open it now so there is always exactly one pass to end + commit.
+    ensureBackbufferPass();
     sg.endPass();
     sg.commit();
 }

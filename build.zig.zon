@@ -80,6 +80,23 @@
             .url = "https://github.com/labelle-toolkit/labelle-audio/archive/refs/tags/v0.4.2.tar.gz",
             .hash = "labelle_audio-0.4.2-QQRmYPTbBABcweqfq5lBsZsOS6Z4EnQ0qDXdESuITDrz",
         },
+        // labelle-gfx (TEST/GOLDEN-ONLY, labelle-gfx#305 Phase 3). The real
+        // backend-agnostic gfx library, pulled in ONLY to drive its
+        // `PostFxDriver` over THIS sokol backend in the post-fx INTEGRATION
+        // golden (src/post_fx_integration_golden.zig). No production code depends
+        // on it: gfx deps `labelle-core`, sokol deps `labelle-core`, and
+        // labelle-gfx is BACKEND-AGNOSTIC (deps core, NOT sokol), so there is no
+        // cycle. build.zig overrides labelle-gfx's own `labelle-core` onto the
+        // sokol backend's core pin (v1.26.0) so the diamond unifies at the SOURCE
+        // level — otherwise `PostPass`/`RenderTargetId` from gfx's core instance
+        // would not type-check against sokol's core instance and
+        // `PostFxDriver(gfx_backend)` wouldn't compile. Desktop/macOS only (the
+        // golden is a GPU + surfaceless test), so marked lazy.
+        .labelle_gfx = .{
+            .url = "https://github.com/labelle-toolkit/labelle-gfx/archive/refs/tags/v1.28.1.tar.gz",
+            .hash = "labelle_gfx-1.28.1-nMpCPI2pBQCPfV_vGRxZPkxx8KKHQHxskJfY8HC4kOWE",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

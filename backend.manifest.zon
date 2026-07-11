@@ -53,4 +53,14 @@
     // true`, so this forward-looking field is inert until the resolve-side
     // mirror lands. Mirrors labelle-bgfx v0.10.0's manifest field.
     .material_effects = .{ .flash, .palette_swap },
+
+    // Curated full-screen post-fx passes this backend implements (labelle-gfx#305
+    // Phase 3, the `.capabilities` mirror of `core.postFxCapabilities(sokolImpl)`
+    // / the runtime `postPassSupported`). sokol implements ALL four built-ins via
+    // hand-authored GLSL410 / GLSL300es / MSL dialects (src/gfx/render_target.zig
+    // + src/gfx/post_fx_shaders.zig); backends with no shader dialect (D3D11 /
+    // WGPU / Vulkan) report `postPassSupported == false` at runtime and the gfx
+    // `PostFxDriver` skips the pass. Same forward-looking DATA contract as
+    // `material_effects` above; mirrors labelle-bgfx's manifest field.
+    .post_fx_passes = .{ .bloom, .vignette, .color_grade, .crt },
 }

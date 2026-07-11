@@ -44,6 +44,25 @@ jobs:
         if: runner.os == 'macOS'
         run: zig build material-golden
 
+      # Post-fx seam golden (labelle-gfx#305 Phase 3): render the fixed scene,
+      # run a bloom→crt post-fx stack through the render-target ping-pong
+      # surfaceless-headless (raw Metal), and diff against the committed golden
+      # BMP. Pins the four post-fx shader dialects. macOS-only (Metal headless).
+      # Regenerate with `zig build post-fx-golden-bless` after a shader change.
+      - name: Post-fx golden (macOS)
+        if: runner.os == 'macOS'
+        run: zig build post-fx-golden
+
+      # Post-fx INTEGRATION golden (labelle-gfx#305 Phase 3): drive the REAL gfx
+      # `PostFxDriver` (test-dep labelle-gfx, its core unified onto sokol's) over
+      # the sokol backend with a bloom→crt stack, surfaceless-headless, and diff
+      # against the same reference. Proves the sokol DEFERRED post-fx model
+      # (plan-then-execute-at-flushScene) faithfully realises the driver's
+      # begin/applyPostPass/resolve ping-pong. macOS-only (Metal headless).
+      - name: Post-fx integration golden (macOS)
+        if: runner.os == 'macOS'
+        run: zig build post-fx-integration-golden
+
   # Integration: generate + build the sokol desktop example (which now lives HERE,
   # not in labelle-assembler — the backend-agnosticism remainder, assembler#520).
   # Verifies the sokol backend works end-to-end through the toolkit against THIS
