@@ -7,6 +7,11 @@ pub const targets_window_contract: u32 = 1;
 const std = @import("std");
 const builtin = @import("builtin");
 const sokol = @import("sokol");
+// The frame host drives the gfx material seam's per-frame lifecycle
+// (labelle-gfx#305): reset the queue in `beginFrame`, replay it in
+// `flushScene` right after the sokol_gl batch flush. Same module instance the
+// game/assembler import, so the module-level queue state is shared.
+const gfx = @import("gfx");
 const sapp = sokol.app;
 const sg = sokol.gfx;
 const sgl = sokol.gl;
@@ -297,6 +302,37 @@ pub fn shutdownGfx() void {
     sg.shutdown();
 }
 
+// ── Surfaceless headless golden entry points (labelle-gfx#305) ──────────────
+// sokol is the one backend that can render + read back with NO window / no
+// display server (a raw Metal device — see reference_sokol_headless_screenshots).
+// `beginHeadless` arms the same offscreen path `runHeadless` uses but WITHOUT
+// the frame loop, so a one-shot golden harness can: beginHeadless → beginFrame/
+// beginPass/draw/flushScene/endFrame → takeScreenshot → endHeadless. Darwin/
+// Metal only (returns false elsewhere: no `MTLCreateSystemDefaultDevice`), so
+// the material golden build step is gated to macOS.
+
+/// Arm surfaceless headless rendering at `w`×`h`. Returns false when no Metal
+/// device is available (non-Darwin, or a runner with no GPU), so the caller
+/// can skip cleanly rather than crash.
+pub fn beginHeadless(w: i32, h: i32) bool {
+    const is_darwin = builtin.target.os.tag == .macos or builtin.target.os.tag == .ios;
+    if (!is_darwin) return false;
+    const device = MTLCreateSystemDefaultDevice() orelse return false;
+    headless_mode = true;
+    headless_mtl_device = device;
+    headless_w = w;
+    headless_h = h;
+    initGfx();
+    return true;
+}
+
+/// Tear down a `beginHeadless` session.
+pub fn endHeadless() void {
+    shutdownGfx();
+    headless_mode = false;
+    headless_mtl_device = null;
+}
+
 /// Request that the sokol_app event loop terminate on the next iteration.
 /// Mirrors `rl.closeWindow` / `sdl.quit` — the generated frame callback
 /// polls `g.isRunning()` and calls this when a script called `game.quit()`.
@@ -390,6 +426,8 @@ pub fn beginFrame() sg.PassAction {
     // sgl.defaults() resets to the default non-blended pipeline; load our
     // alpha-blended pipeline so sprites render transparency correctly.
     sgl.loadPipeline(alpha_pipeline);
+    // Drop last frame's queued material sprites (labelle-gfx#305).
+    gfx.resetMaterials();
     var pass_action: sg.PassAction = .{};
     pass_action.colors[0] = .{
         .load_action = .CLEAR,
@@ -554,6 +592,10 @@ pub fn headlessColorTexture() ?*const anyopaque {
 /// top of the GUI and hid it entirely. See labelle-toolkit/labelle-imgui#4.
 pub fn flushScene() void {
     sgl.draw();
+    // Replay queued material sprites (labelle-gfx#305) immediately AFTER the
+    // sokol_gl batch so they composite on top of it. Must be inside the active
+    // pass — flushScene always is. No-op when nothing was queued.
+    gfx.flushMaterials();
 }
 
 pub fn endFrame() void {

@@ -39,6 +39,14 @@
         .audio_ogg,
     },
 
+    // Curated material effects this backend implements (labelle-gfx#305) — the
+    // `.capabilities` mirror of `core.materialCapabilities(sokolImpl)` / the
+    // runtime `materialSupported`. sokol implements `flash` + `palette_swap`
+    // (src/gfx/material.zig); `dissolve` / `outline` degrade to a plain sprite.
+    // Inert until the resolve-side mirror lands (`ignore_unknown_fields`).
+    // Mirrors labelle-bgfx v0.10.0's manifest field.
+    .material_effects = .{ .flash, .palette_swap },
+
     // root_alias defaults to `backend_<name>`, so the generated root imports
     // these as `backend_gfx`/`backend_input`/… exactly as the enum path does.
     // Sources match the real repo layout (src/gfx.zig, src/input.zig,

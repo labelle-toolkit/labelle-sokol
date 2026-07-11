@@ -29,6 +29,7 @@ const draw = @import("gfx/draw.zig");
 const texture = @import("gfx/texture.zig");
 const font_atlas = @import("gfx/font_atlas.zig");
 const font = @import("gfx/font.zig");
+const material = @import("gfx/material.zig");
 
 // ── Backend types ──────────────────────────────────────────────────────
 
@@ -76,6 +77,20 @@ pub const drawTriangle = draw.drawTriangle;
 pub const drawPolygon = draw.drawPolygon;
 pub const drawLine = draw.drawLine;
 pub const drawText = font_atlas.drawText;
+
+// ── Material seam (labelle-gfx#305, Phase 3 sokol parity slice 1) ───────
+// Optional, `@hasDecl`-gated on the `core.Backend(Impl)` wrapper: per-sprite
+// curated shader effects (`flash`, `palette_swap`). `materialSupported` is the
+// effect-level capability gate; `drawTextureProMaterial` is the material-aware
+// draw. See src/gfx/material.zig for the raw-sokol_gfx rationale (sokol_gl can't
+// carry a custom fragment shader). `registerLut` maps a LUT texture to the flat
+// `aux_texture` handle a `palette_swap` draw expects. `resetMaterials` /
+// `flushMaterials` are the per-frame lifecycle hooks driven by window.zig.
+pub const materialSupported = material.materialSupported;
+pub const drawTextureProMaterial = material.drawTextureProMaterial;
+pub const registerLut = material.registerLut;
+pub const resetMaterials = material.reset;
+pub const flushMaterials = material.flush;
 
 // ── Texture loading / decoding ─────────────────────────────────────────
 
