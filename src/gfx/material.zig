@@ -1,5 +1,5 @@
 //! Material seam for the sokol gfx backend (labelle-gfx#305, Phase 3 — the
-//! FIRST sokol parity slice: per-sprite `flash` + `palette_swap`).
+//! FULL curated set: per-sprite `flash`, `palette_swap`, `dissolve`, `outline`).
 //!
 //! ── Why this can't ride sokol_gl ─────────────────────────────────────────
 //! Sprites in this backend draw through sokol_gl (`draw.zig`), whose FRAGMENT
@@ -25,7 +25,11 @@
 //! `drawTextureProMaterial` falls back to a plain `drawTexturePro` (via
 //! sokol_gl) whenever it cannot honour the effect: an unsupported effect, a
 //! backend with no shader dialect here (D3D11/WGPU/Vulkan), `palette_swap` with
-//! no/dead LUT (`aux_texture == 0`), or a full queue.
+//! no/dead LUT (`aux_texture == 0`), a PER-EFFECT pipeline that failed to build
+//! on this driver (the other effects keep working — bgfx per-effect isolation
+//! parity), or a full queue. `dissolve` NEVER degrades on a missing noise
+//! texture: `aux_texture == 0`/dead falls back to the built-in procedural noise
+//! (bgfx parity — never a black quad, never a plain sprite).
 
 const std = @import("std");
 const sokol = @import("sokol");
@@ -48,8 +52,9 @@ const Material = core.backend_contract.Material;
 // ── Backend-facing capability (contract decl) ───────────────────────────────
 
 /// Effect-level capability gate consumed by `core.Backend(Impl)` and
-/// `core.materialCapabilities`. sokol implements `flash` + `palette_swap`;
-/// `dissolve` / `outline` are not yet implemented and degrade to a plain sprite.
+/// `core.materialCapabilities`. sokol implements the FULL curated set —
+/// `flash`, `palette_swap`, `dissolve`, `outline`; only `none` (the no-material
+/// fast path) reports false.
 ///
 /// Two-context honesty:
 ///   - COMPTIME (the contract's `materialCapabilities` introspection, which
@@ -60,12 +65,14 @@ const Material = core.backend_contract.Material;
 ///   - RUNTIME (the per-draw `core.Backend(Impl)` gate): additionally require a
 ///     shader dialect for the LIVE graphics backend. `pickSources()` returns
 ///     null on `D3D11` / `WGPU` / `VULKAN` (no hand-authored dialect yet), so
-///     `flash`/`palette_swap` on those backends report FALSE — honest, rather
-///     than claiming support then silently degrading to a plain sprite.
+///     every effect on those backends reports FALSE — honest, rather than
+///     claiming support then silently degrading to a plain sprite. (A single
+///     effect whose PIPELINE failed to build on an otherwise-supported backend
+///     is finer-grained still — gated per-draw via `effectReady`, bgfx parity.)
 pub fn materialSupported(effect: MaterialEffect) bool {
     const implemented = switch (effect) {
-        .flash, .palette_swap => true,
-        .dissolve, .outline, .none => false,
+        .flash, .palette_swap, .dissolve, .outline => true,
+        .none => false,
     };
     if (!implemented) return false;
     if (@inComptime()) return true;
@@ -86,14 +93,40 @@ const MaterialVertex = extern struct {
     a: f32,
 };
 
-/// Fragment-stage uniform block, byte-identical to the shader's `u_material[2]`
-/// (two vec4s). `color` = flash color (unused by palette); `params` =
-/// (amount, scalar1, aux_count, 0) — flash reads `.x`, palette reads `.z`.
-/// Matches the bgfx packing (`programs.zig submitMaterialTriangles`).
+/// Fragment-stage uniform block. flash/palette declare `u_material[2]` (the
+/// first two vec4s, 32 bytes — `flush` uploads only that prefix, keeping those
+/// shaders byte-identical to slice 1); dissolve/outline declare `u_material[4]`
+/// (all 64 bytes). Matches the bgfx uniform packing
+/// (`programs.zig submitMaterialTriangles`):
+///   color  = MaterialUniforms r,g,b,a (flash colour / dissolve burn-edge glow
+///            / outline colour; unused by palette)
+///   params = (scalar0, scalar1, aux_count, use_noise) — flash: .x=amount;
+///            palette: .z=count; dissolve: .x=threshold .y=edge_width
+///            .w=1 when a noise texture is bound at unit 1; outline:
+///            .x=thickness(px) .y=softness
+///   texel  = (1/w, 1/h, w, h) — sprite texture pixel size (outline px→UV)
+///   rect   = (u0, v0, u1, v1) — the source frame in whole-atlas UV space
+///            ((0,0,1,1) for a standalone texture); dissolve's sprite-local
+///            noise remap + outline's per-frame tap gate
 const MaterialFsParams = extern struct {
     color: [4]f32,
     params: [4]f32,
+    texel: [4]f32 = .{ 0, 0, 0, 0 },
+    rect: [4]f32 = .{ 0, 0, 1, 1 },
 };
+
+/// Byte size of the uniform block `effect`'s shader declares (see above).
+/// EXHAUSTIVE on purpose (no `else`): adding a new `MaterialEffect` must be a
+/// compile error here — a wildcard would silently upload the wrong block size.
+fn uniformSize(effect: MaterialEffect) usize {
+    return switch (effect) {
+        .flash, .palette_swap => 2 * @sizeOf([4]f32), // u_material[2] prefix
+        .dissolve, .outline => @sizeOf(MaterialFsParams), // u_material[4]
+        // Never queued (materialSupported(.none) == false gates the draw site
+        // and `effectReady` re-gates in flush); smallest block if ever probed.
+        .none => 2 * @sizeOf([4]f32),
+    };
+}
 
 // One deferred material draw: its 6 NDC vertices (two triangles) + everything
 // `flush()` needs to bind. Handles (views/samplers) stay valid for the frame.
@@ -125,11 +158,40 @@ var supported_backend: bool = false;
 var vbuf: sg.Buffer = .{};
 var flash_pip: sg.Pipeline = .{};
 var palette_pip: sg.Pipeline = .{};
+var dissolve_pip: sg.Pipeline = .{};
+var outline_pip: sg.Pipeline = .{};
+// Per-effect readiness (bgfx per-effect isolation parity, #49 finding A): a
+// shader/pipeline build failure in ONE effect (e.g. a driver rejecting
+// fs_outline) leaves the OTHERS valid — only the failed effect degrades to a
+// plain sprite, never the whole seam. Indexed by `effectIndex`.
+var effect_ready = [4]bool{ false, false, false, false };
+
+// EXHAUSTIVE (no `else`), like every material-effect switch in this file: a
+// new `MaterialEffect` member must fail to compile here rather than silently
+// half-wire (report unready → permanent plain-sprite degrade).
+fn effectIndex(effect: MaterialEffect) ?usize {
+    return switch (effect) {
+        .flash => 0,
+        .palette_swap => 1,
+        .dissolve => 2,
+        .outline => 3,
+        .none => null,
+    };
+}
+
+/// True when `effect`'s pipeline built + validated on this driver (and the
+/// shared vertex buffer exists). Per-draw gate — see `effect_ready`.
+fn effectReady(effect: MaterialEffect) bool {
+    const i = effectIndex(effect) orelse return false;
+    return supported_backend and effect_ready[i];
+}
 
 const ShaderSources = struct {
     vs: [*c]const u8,
     fs_flash: [*c]const u8,
     fs_palette: [*c]const u8,
+    fs_dissolve: [*c]const u8,
+    fs_outline: [*c]const u8,
     metal: bool,
 };
 
@@ -141,18 +203,24 @@ fn pickSources() ?ShaderSources {
             .vs = shaders.vs_glsl410,
             .fs_flash = shaders.fs_flash_glsl410,
             .fs_palette = shaders.fs_palette_glsl410,
+            .fs_dissolve = shaders.fs_dissolve_glsl410,
+            .fs_outline = shaders.fs_outline_glsl410,
             .metal = false,
         },
         .GLES3 => .{
             .vs = shaders.vs_glsl300es,
             .fs_flash = shaders.fs_flash_glsl300es,
             .fs_palette = shaders.fs_palette_glsl300es,
+            .fs_dissolve = shaders.fs_dissolve_glsl300es,
+            .fs_outline = shaders.fs_outline_glsl300es,
             .metal = false,
         },
         .METAL_MACOS, .METAL_IOS, .METAL_SIMULATOR => .{
             .vs = shaders.vs_metal,
             .fs_flash = shaders.fs_flash_metal,
             .fs_palette = shaders.fs_palette_metal,
+            .fs_dissolve = shaders.fs_dissolve_metal,
+            .fs_outline = shaders.fs_outline_metal,
             .metal = true,
         },
         // No HLSL / WGSL / SPIR-V dialect authored yet — degrade (documented).
@@ -160,9 +228,20 @@ fn pickSources() ?ShaderSources {
     };
 }
 
-fn makeMaterialShader(srcs: ShaderSources, fs: [*c]const u8, palette: bool) sg.Shader {
+/// Per-effect shader-shape knobs for `makeMaterialShader`.
+const ShaderShape = struct {
+    label: [*c]const u8,
+    /// Declares the unit-1 aux sampler pair (`lut_smp`): the LUT ramp for
+    /// palette_swap, the (optional) noise texture for dissolve.
+    aux: bool,
+    /// `u_material` vec4 count: 2 for flash/palette, 4 for dissolve/outline
+    /// (which add texel + rect). MUST match the shader's declared array size.
+    vec4_count: u16,
+};
+
+fn makeMaterialShader(srcs: ShaderSources, fs: [*c]const u8, shape: ShaderShape) sg.Shader {
     var desc: sg.ShaderDesc = .{};
-    desc.label = if (palette) "material-palette" else "material-flash";
+    desc.label = shape.label;
     desc.vertex_func.source = srcs.vs;
     desc.fragment_func.source = fs;
     if (srcs.metal) {
@@ -175,13 +254,13 @@ fn makeMaterialShader(srcs: ShaderSources, fs: [*c]const u8, palette: bool) sg.S
     desc.attrs[1] = .{ .base_type = .FLOAT, .glsl_name = "texcoord0" };
     desc.attrs[2] = .{ .base_type = .FLOAT, .glsl_name = "color0" };
 
-    // Fragment uniform block `u_material` = 2×vec4 (32 bytes), bind slot 0.
+    // Fragment uniform block `u_material` = vec4_count×vec4, bind slot 0.
     desc.uniform_blocks[0].stage = .FRAGMENT;
-    desc.uniform_blocks[0].size = @sizeOf(MaterialFsParams);
+    desc.uniform_blocks[0].size = @as(u32, shape.vec4_count) * @sizeOf([4]f32);
     desc.uniform_blocks[0].msl_buffer_n = 0;
     desc.uniform_blocks[0].glsl_uniforms[0] = .{
         .type = .FLOAT4,
-        .array_count = 2,
+        .array_count = shape.vec4_count,
         .glsl_name = "u_material",
     };
 
@@ -200,8 +279,8 @@ fn makeMaterialShader(srcs: ShaderSources, fs: [*c]const u8, palette: bool) sg.S
         .glsl_name = "tex_smp",
     };
 
-    if (palette) {
-        // LUT ramp at unit 1.
+    if (shape.aux) {
+        // Aux texture at unit 1 (palette LUT ramp / dissolve noise).
         desc.views[1].texture = .{
             .stage = .FRAGMENT,
             .image_type = ._2D,
@@ -244,9 +323,32 @@ fn makeMaterialPipeline(shader: sg.Shader) sg.Pipeline {
     return sg.makePipeline(pdesc);
 }
 
-/// Lazily create the streamed vertex buffer + both effect programs on first
-/// use. Idempotent. Sets `supported_backend` = false (and returns false) when
-/// the live backend has no authored shader dialect, so callers degrade.
+/// Build ONE effect's shader + pipeline; returns the pipeline and whether it
+/// validated. A compile/link failure on this driver leaves a FAILED-state
+/// resource, which we detect via `sg.queryShaderState`/`queryPipelineState`
+/// (a dead-pool `id == 0` also reads as not-VALID) — the failed effect's
+/// resources are destroyed and it alone degrades (bgfx parity).
+fn buildEffectPipeline(srcs: ShaderSources, fs: [*c]const u8, shape: ShaderShape) struct { pip: sg.Pipeline, ok: bool } {
+    const shd = makeMaterialShader(srcs, fs, shape);
+    if (shd.id == 0 or sg.queryShaderState(shd) != .VALID) {
+        if (shd.id != 0) sg.destroyShader(shd);
+        return .{ .pip = .{}, .ok = false };
+    }
+    const pip = makeMaterialPipeline(shd);
+    if (pip.id == 0 or sg.queryPipelineState(pip) != .VALID) {
+        if (pip.id != 0) sg.destroyPipeline(pip);
+        sg.destroyShader(shd);
+        return .{ .pip = .{}, .ok = false };
+    }
+    return .{ .pip = pip, .ok = true };
+}
+
+/// Lazily create the streamed vertex buffer + the four effect pipelines on
+/// first use. Idempotent. Sets `supported_backend` = false (and returns false)
+/// when the live backend has no authored shader dialect or the SHARED vertex
+/// buffer can't be created, so callers degrade. Each effect pipeline is built
+/// INDEPENDENTLY (bgfx #49 per-effect isolation): one failing leaves the others
+/// valid, gated per-draw by `effectReady`.
 fn ensureInitialized() bool {
     if (initialized) return supported_backend;
     initialized = true;
@@ -264,6 +366,9 @@ fn ensureInitialized() bool {
         return false;
     };
 
+    // The one SHARED hard dependency: every material draw streams through this
+    // buffer, so failing it degrades the whole seam (mirrors bgfx's shared
+    // uniforms being the only all-effects-fatal failure).
     vbuf = sg.makeBuffer(.{
         .size = @sizeOf(MaterialVertex) * MAX_VERTS,
         .usage = .{ .vertex_buffer = true, .stream_update = true },
@@ -274,21 +379,26 @@ fn ensureInitialized() bool {
         return false;
     }
 
-    const flash_shd = makeMaterialShader(srcs, srcs.fs_flash, false);
-    const palette_shd = makeMaterialShader(srcs, srcs.fs_palette, true);
-    if (flash_shd.id == 0 or palette_shd.id == 0) {
-        supported_backend = false;
-        return false;
-    }
-    flash_pip = makeMaterialPipeline(flash_shd);
-    palette_pip = makeMaterialPipeline(palette_shd);
-    if (flash_pip.id == 0 or palette_pip.id == 0) {
-        supported_backend = false;
-        return false;
+    const flash_b = buildEffectPipeline(srcs, srcs.fs_flash, .{ .label = "material-flash", .aux = false, .vec4_count = 2 });
+    const palette_b = buildEffectPipeline(srcs, srcs.fs_palette, .{ .label = "material-palette", .aux = true, .vec4_count = 2 });
+    const dissolve_b = buildEffectPipeline(srcs, srcs.fs_dissolve, .{ .label = "material-dissolve", .aux = true, .vec4_count = 4 });
+    const outline_b = buildEffectPipeline(srcs, srcs.fs_outline, .{ .label = "material-outline", .aux = false, .vec4_count = 4 });
+    flash_pip = flash_b.pip;
+    palette_pip = palette_b.pip;
+    dissolve_pip = dissolve_b.pip;
+    outline_pip = outline_b.pip;
+    effect_ready = .{ flash_b.ok, palette_b.ok, dissolve_b.ok, outline_b.ok };
+
+    if (!flash_b.ok or !palette_b.ok or !dissolve_b.ok or !outline_b.ok) {
+        std.log.warn(
+            "labelle-sokol: some material pipelines failed to build; those effects degrade to plain sprites (flash={} palette_swap={} dissolve={} outline={})",
+            .{ flash_b.ok, palette_b.ok, dissolve_b.ok, outline_b.ok },
+        );
     }
 
-    supported_backend = true;
-    return true;
+    // The seam is armed if ANY effect built (per-effect gating handles the rest).
+    supported_backend = flash_b.ok or palette_b.ok or dissolve_b.ok or outline_b.ok;
+    return supported_backend;
 }
 
 // ── UV helpers (identical convention to draw.zig drawTexturePro) ─────────────
@@ -362,21 +472,50 @@ pub fn drawTextureProMaterial(
         return;
     }
 
-    // Resolve the LUT for palette_swap. A zero/dead handle degrades to plain.
+    // Resolve the unit-1 aux texture. `palette_swap`: the LUT ramp — a zero/dead
+    // handle degrades to plain (RFC §3). `dissolve`: the OPTIONAL noise texture —
+    // a zero/dead/unknown handle falls back to the built-in procedural noise
+    // (never degrades; bgfx parity), binding the sprite's OWN texture as a
+    // harmless dummy so unit 1 is never an unbound-sampler read. `use_noise`
+    // becomes params.w (the shader's procedural/texture selector).
     var lut_view: sg.View = .{};
     var lut_smp: sg.Sampler = .{};
-    if (material.effect == .palette_swap) {
-        const lut_id = material.uniforms.aux_texture;
-        const lut = lut_registry.lookup(lut_id) orelse {
-            draw.drawTexturePro(texture, source, dest, origin, rotation, tint);
-            return;
-        };
-        lut_view = lut.view;
-        lut_smp = lut.smp;
+    var use_noise: f32 = 0;
+    switch (material.effect) {
+        .palette_swap => {
+            const lut_id = material.uniforms.aux_texture;
+            const lut = lut_registry.lookup(lut_id) orelse {
+                draw.drawTexturePro(texture, source, dest, origin, rotation, tint);
+                return;
+            };
+            lut_view = lut.view;
+            lut_smp = lut.smp;
+        },
+        .dissolve => {
+            if (lut_registry.lookup(material.uniforms.aux_texture)) |noise| {
+                lut_view = noise.view;
+                lut_smp = noise.smp;
+                use_noise = 1;
+            } else {
+                lut_view = texture.view; // valid dummy; shader ignores it (params.w = 0)
+                lut_smp = texture.smp;
+            }
+        },
+        // EXHAUSTIVE: a new effect must decide its unit-1 aux story here at
+        // compile time, not silently inherit "no aux".
+        .flash, .outline, .none => {},
     }
 
     // Backend has no shader dialect here, or GPU-object build failed → plain.
     if (!ensureInitialized()) {
+        draw.drawTexturePro(texture, source, dest, origin, rotation, tint);
+        return;
+    }
+
+    // Per-effect runtime gate (bgfx per-effect isolation parity): THIS effect's
+    // pipeline may have failed to build on this driver while the others are
+    // fine. Degrade only the failed effect to a plain sprite.
+    if (!effectReady(material.effect)) {
         draw.drawTexturePro(texture, source, dest, origin, rotation, tint);
         return;
     }
@@ -426,13 +565,37 @@ pub fn drawTextureProMaterial(
         corners = .{ .{ x0, y0 }, .{ x1, y0 }, .{ x1, y1 }, .{ x0, y1 } };
     }
 
+    // The sprite's source frame in whole-atlas UV space (u0, v0, u1, v1) →
+    // `u_material[3]`. labelle sprites are atlas SUB-RECTS: dissolve remaps the
+    // atlas UV to sprite-local (per-frame-consistent noise scale) and outline
+    // gates its neighbour taps to this rect so it can't dilate an adjacent
+    // frame's content. Absolute extents (|w|, |h|) so the flip convention
+    // (negative source.width/height) doesn't invert the bounds. (0,0,1,1) for a
+    // standalone texture. Mirrors bgfx `texture.drawTextureProMaterial`.
+    //
+    // KNOWN LIMITATION (bgfx parity, documented there as #4): the outline draws
+    // through the normal sprite quad, so it only appears WITHIN `dest` — a
+    // tightly-cropped frame whose opaque pixels reach the frame edge has its
+    // outward outline clipped at the frame boundary. Full outward outline needs
+    // quad expansion — a P3 follow-up on both backends.
+    const tw: f32 = @floatFromInt(texture.width);
+    const th: f32 = @floatFromInt(texture.height);
+    const rect = [4]f32{
+        source.x / tw,
+        source.y / th,
+        (source.x + @abs(source.width)) / tw,
+        (source.y + @abs(source.height)) / th,
+    };
+
     const base = pushQuad(corners, uv, r, g, b, a);
     queue[queue_len] = .{
         .base = base,
         .effect = material.effect,
         .fs = .{
             .color = .{ material.uniforms.r, material.uniforms.g, material.uniforms.b, material.uniforms.a },
-            .params = .{ material.uniforms.scalar0, material.uniforms.scalar1, @floatFromInt(material.uniforms.aux_count), 0 },
+            .params = .{ material.uniforms.scalar0, material.uniforms.scalar1, @floatFromInt(material.uniforms.aux_count), use_noise },
+            .texel = .{ 1.0 / @max(tw, 1), 1.0 / @max(th, 1), @max(tw, 1), @max(th, 1) },
+            .rect = rect,
         },
         .tex_view = texture.view,
         .tex_smp = texture.smp,
@@ -452,14 +615,18 @@ pub fn drawTextureProMaterial(
 // id→(view,sampler) reverse map, so a raw texture id can't be resolved to the
 // bindable handles a draw needs. As a bridge, a palette_swap caller on sokol must
 // FIRST call `gfx.registerLut(lutTexture)` and pass the returned 1-based handle as
-// `aux_texture`. That extra call is a sokol-specific divergence from the contract
-// — a game written straight to the contract (setting `aux_texture = lut.id`) will
-// degrade to a plain sprite on sokol (never crash: an unknown handle just misses
-// the registry). The clean fix (a follow-up) is a global texture registry
-// populated at `uploadTexture`/torn down at `unloadTexture`, so `aux_texture =
-// lut.id` resolves directly like bgfx; deferred here to keep this slice bounded
-// (it needs upload/unload lifetime wiring in texture.zig). `0` is reserved "none"
-// and always degrades.
+// `aux_texture` — and a dissolve caller wanting a CUSTOM noise texture registers
+// it the same way (an unregistered/zero dissolve handle is NOT a degrade: it
+// falls back to the built-in procedural noise). That extra call is a
+// sokol-specific divergence from the contract — a game written straight to the
+// contract (setting `aux_texture = lut.id`) will degrade to a plain sprite on
+// sokol for palette_swap / render procedural noise for dissolve (never crash: an
+// unknown handle just misses the registry). The clean fix (a follow-up) is a
+// global texture registry populated at `uploadTexture`/torn down at
+// `unloadTexture`, so `aux_texture = lut.id` resolves directly like bgfx;
+// deferred here to keep this slice bounded (it needs upload/unload lifetime
+// wiring in texture.zig). `0` is reserved "none": palette degrades, dissolve
+// goes procedural.
 
 pub const LutEntry = struct { view: sg.View, smp: sg.Sampler };
 var lut_slots: [256]LutEntry = undefined;
@@ -529,10 +696,16 @@ pub fn flush() void {
     var i: u32 = 0;
     while (i < queue_len) : (i += 1) {
         const d = queue[i];
+        if (!effectReady(d.effect)) continue; // defensive; the draw site gated
+        // EXHAUSTIVE: a new effect must be routed to its pipeline here at
+        // compile time. `.none` can't be queued (gated at the draw site and by
+        // `effectReady` above) — skip defensively rather than bind a dead pip.
         const pip = switch (d.effect) {
             .flash => flash_pip,
             .palette_swap => palette_pip,
-            else => continue,
+            .dissolve => dissolve_pip,
+            .outline => outline_pip,
+            .none => continue,
         };
         sg.applyPipeline(pip);
 
@@ -540,14 +713,21 @@ pub fn flush() void {
         bindings.vertex_buffers[0] = vbuf;
         bindings.views[0] = d.tex_view;
         bindings.samplers[0] = d.tex_smp;
-        if (d.effect == .palette_swap) {
+        // palette_swap + dissolve sample the aux texture at unit 1 (`lut_smp`):
+        // the LUT ramp / the noise texture (or the sprite's own texture as the
+        // procedural-path dummy — always a VALID view, see the draw site).
+        if (d.effect == .palette_swap or d.effect == .dissolve) {
             bindings.views[1] = d.lut_view;
             bindings.samplers[1] = d.lut_smp;
         }
         sg.applyBindings(bindings);
 
+        // Upload exactly the block size THIS effect's shader declares:
+        // u_material[2] (32-byte prefix) for flash/palette, u_material[4]
+        // (full 64) for dissolve/outline. sokol validates the range size
+        // against the declared uniform-block size, so this must match.
         var fs = d.fs;
-        sg.applyUniforms(0, sg.asRange(&fs));
+        sg.applyUniforms(0, .{ .ptr = &fs, .size = uniformSize(d.effect) });
 
         sg.draw(d.base, 6, 1);
     }
@@ -555,31 +735,46 @@ pub fn flush() void {
 
 // ── Tests (pure-CPU: capability gate + contract introspection) ───────────────
 
-test "materialSupported: flash + palette_swap only" {
+test "materialSupported: the full curated set (only none is false)" {
     try std.testing.expect(materialSupported(.flash));
     try std.testing.expect(materialSupported(.palette_swap));
-    try std.testing.expect(!materialSupported(.dissolve));
-    try std.testing.expect(!materialSupported(.outline));
+    try std.testing.expect(materialSupported(.dissolve));
+    try std.testing.expect(materialSupported(.outline));
     try std.testing.expect(!materialSupported(.none));
 }
 
-test "materialCapabilities advertises exactly flash + palette_swap" {
+test "materialCapabilities advertises all four curated effects" {
     // This module owns both `drawTextureProMaterial` + `materialSupported`
     // (re-exported verbatim by gfx.zig, the actual Impl), so the contract's
-    // comptime introspection must resolve to our two effects.
+    // comptime introspection must resolve to the full curated set.
     const caps = core.backend_contract.materialCapabilities(@This());
-    try std.testing.expectEqual(@as(usize, 2), caps.effects.len);
-    var has_flash = false;
-    var has_palette = false;
+    try std.testing.expectEqual(@as(usize, 4), caps.effects.len);
+    var has = [4]bool{ false, false, false, false };
     for (caps.effects) |e| {
-        if (e == .flash) has_flash = true;
-        if (e == .palette_swap) has_palette = true;
+        switch (e) {
+            .flash => has[0] = true,
+            .palette_swap => has[1] = true,
+            .dissolve => has[2] = true,
+            .outline => has[3] = true,
+            .none => {},
+        }
     }
-    try std.testing.expect(has_flash and has_palette);
+    try std.testing.expect(has[0] and has[1] and has[2] and has[3]);
 }
 
-test "MaterialFsParams matches the shader uniform block size (2x vec4)" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(MaterialFsParams));
+test "MaterialFsParams matches the shader uniform block sizes" {
+    // Full block (dissolve/outline `u_material[4]`) = 64 bytes; the
+    // flash/palette prefix (`u_material[2]`) = 32.
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(MaterialFsParams));
+    try std.testing.expectEqual(@as(usize, 64), uniformSize(.dissolve));
+    try std.testing.expectEqual(@as(usize, 64), uniformSize(.outline));
+    try std.testing.expectEqual(@as(usize, 32), uniformSize(.flash));
+    try std.testing.expectEqual(@as(usize, 32), uniformSize(.palette_swap));
+    // The prefix layout the 32-byte upload relies on: color at 0, params at 16.
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(MaterialFsParams, "color"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(MaterialFsParams, "params"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(MaterialFsParams, "texel"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(MaterialFsParams, "rect"));
 }
 
 test "registerLut is idempotent per view id; distinct views get distinct handles" {
