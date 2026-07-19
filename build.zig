@@ -459,9 +459,11 @@ pub fn build(b: *std.Build) void {
     // key-repeat regression) call no sokol API, so run them natively too.
     test_host_step.dependOn(&b.addRunArtifact(input_compile_check).step);
 
-    // ── Material golden harness (labelle-gfx#305, Phase 3 sokol slice 1) ─────
-    // `zig build material-golden`       — render the FIXED flash + palette_swap
-    //     scene surfaceless-headless and DIFF it against the committed golden BMP.
+    // ── Material golden harness (labelle-gfx#305, Phase 3 — full set) ────────
+    // `zig build material-golden`       — render the FIXED 10-column scene
+    //     (flash, palette_swap, dissolve, outline + the atlas/tint/threshold
+    //     boundary cases, mirroring the bgfx golden) surfaceless-headless and
+    //     DIFF it against the committed golden BMP.
     // `zig build material-golden-bless` — regenerate + overwrite the golden.
     //
     // macOS-only: the headless path is raw-Metal (`window.beginHeadless` →
@@ -525,7 +527,7 @@ pub fn build(b: *std.Build) void {
         };
 
         const golden_check = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "material_golden", "src/material_golden.zig", false);
-        const golden_step = b.step("material-golden", "Diff the material flash + palette_swap scene against the committed golden (#305)");
+        const golden_step = b.step("material-golden", "Diff the full material-effect scene (flash/palette_swap/dissolve/outline) against the committed golden (#305)");
         golden_step.dependOn(&golden_check.step);
 
         const golden_bless = Golden.make(b, target, optimize, sokol_mod, gfx_mod, window_mod, null, sokol_clib, "material_golden", "src/material_golden.zig", true);

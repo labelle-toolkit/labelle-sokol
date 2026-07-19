@@ -41,11 +41,11 @@
 
     // Curated material effects this backend implements (labelle-gfx#305) — the
     // `.capabilities` mirror of `core.materialCapabilities(sokolImpl)` / the
-    // runtime `materialSupported`. sokol implements `flash` + `palette_swap`
-    // (src/gfx/material.zig); `dissolve` / `outline` degrade to a plain sprite.
+    // runtime `materialSupported`. sokol implements the FULL curated set —
+    // `flash`, `palette_swap`, `dissolve`, `outline` (src/gfx/material.zig).
     // Inert until the resolve-side mirror lands (`ignore_unknown_fields`).
-    // Mirrors labelle-bgfx v0.10.0's manifest field.
-    .material_effects = .{ .flash, .palette_swap },
+    // Mirrors labelle-bgfx v0.12.0's manifest field.
+    .material_effects = .{ .flash, .palette_swap, .dissolve, .outline },
 
     // Curated full-screen post-fx passes this backend implements (labelle-gfx#305
     // Phase 3) — the `.capabilities` mirror of `core.postFxCapabilities(sokolImpl)`

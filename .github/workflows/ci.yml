@@ -34,10 +34,12 @@ jobs:
       - name: Build + test
         run: zig build test
 
-      # Material seam golden (labelle-gfx#305): render the fixed flash +
-      # palette_swap scene surfaceless-headless (raw Metal, no GUI session) and
-      # diff it against the committed golden BMP. macOS-only — the headless path
-      # is Metal (`window.beginHeadless`); the step doesn't exist on the Linux
+      # Material seam golden (labelle-gfx#305): render the fixed 10-column
+      # scene covering the FULL curated set (flash, palette_swap, dissolve,
+      # outline + atlas/tint/threshold boundary cases, mirroring the bgfx
+      # golden) surfaceless-headless (raw Metal, no GUI session) and diff it
+      # against the committed golden BMP. macOS-only — the headless path is
+      # Metal (`window.beginHeadless`); the step doesn't exist on the Linux
       # leg. Regenerate with `zig build material-golden-bless` after an
       # intentional shader change.
       - name: Material golden (macOS)

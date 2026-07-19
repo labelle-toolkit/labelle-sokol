@@ -46,13 +46,13 @@
     // `.capabilities` mirror of `core.materialCapabilities(sokolImpl)` / the
     // runtime `materialSupported`). Advertised as DATA so a project declaring an
     // unsupported effect can surface at generate/resolve time rather than
-    // silently degrading per-frame. sokol implements `flash` + `palette_swap`
-    // (src/gfx/material.zig `materialSupported` + `drawTextureProMaterial`);
-    // `dissolve` / `outline` are not yet implemented and degrade to a plain
-    // sprite. The assembler parses manifests with `ignore_unknown_fields =
-    // true`, so this forward-looking field is inert until the resolve-side
-    // mirror lands. Mirrors labelle-bgfx v0.10.0's manifest field.
-    .material_effects = .{ .flash, .palette_swap },
+    // silently degrading per-frame. sokol implements the FULL curated set —
+    // `flash`, `palette_swap`, `dissolve`, `outline` (src/gfx/material.zig
+    // `materialSupported` + `drawTextureProMaterial`). The assembler parses
+    // manifests with `ignore_unknown_fields = true`, so this forward-looking
+    // field is inert until the resolve-side mirror lands. Mirrors
+    // labelle-bgfx v0.12.0's manifest field.
+    .material_effects = .{ .flash, .palette_swap, .dissolve, .outline },
 
     // Curated full-screen post-fx passes this backend implements (labelle-gfx#305
     // Phase 3, the `.capabilities` mirror of `core.postFxCapabilities(sokolImpl)`

@@ -79,14 +79,16 @@ pub const drawPolygon = draw.drawPolygon;
 pub const drawLine = draw.drawLine;
 pub const drawText = font_atlas.drawText;
 
-// ── Material seam (labelle-gfx#305, Phase 3 sokol parity slice 1) ───────
+// ── Material seam (labelle-gfx#305, Phase 3 — full curated set) ─────────
 // Optional, `@hasDecl`-gated on the `core.Backend(Impl)` wrapper: per-sprite
-// curated shader effects (`flash`, `palette_swap`). `materialSupported` is the
-// effect-level capability gate; `drawTextureProMaterial` is the material-aware
-// draw. See src/gfx/material.zig for the raw-sokol_gfx rationale (sokol_gl can't
-// carry a custom fragment shader). `registerLut` maps a LUT texture to the flat
-// `aux_texture` handle a `palette_swap` draw expects. `resetMaterials` /
-// `flushMaterials` are the per-frame lifecycle hooks driven by window.zig.
+// curated shader effects (`flash`, `palette_swap`, `dissolve`, `outline`).
+// `materialSupported` is the effect-level capability gate;
+// `drawTextureProMaterial` is the material-aware draw. See src/gfx/material.zig
+// for the raw-sokol_gfx rationale (sokol_gl can't carry a custom fragment
+// shader). `registerLut` maps an aux texture (palette LUT ramp / optional
+// dissolve noise texture) to the flat `aux_texture` handle a material draw
+// expects. `resetMaterials` / `flushMaterials` are the per-frame lifecycle
+// hooks driven by window.zig.
 //
 // Version gate: the assembler UNIFIES the *game's* labelle-core onto every
 // backend module (backend_gfx included — see the Android build's single
