@@ -116,10 +116,15 @@ const MaterialFsParams = extern struct {
 };
 
 /// Byte size of the uniform block `effect`'s shader declares (see above).
+/// EXHAUSTIVE on purpose (no `else`): adding a new `MaterialEffect` must be a
+/// compile error here — a wildcard would silently upload the wrong block size.
 fn uniformSize(effect: MaterialEffect) usize {
     return switch (effect) {
+        .flash, .palette_swap => 2 * @sizeOf([4]f32), // u_material[2] prefix
         .dissolve, .outline => @sizeOf(MaterialFsParams), // u_material[4]
-        else => 2 * @sizeOf([4]f32), // u_material[2] prefix
+        // Never queued (materialSupported(.none) == false gates the draw site
+        // and `effectReady` re-gates in flush); smallest block if ever probed.
+        .none => 2 * @sizeOf([4]f32),
     };
 }
 
@@ -161,13 +166,16 @@ var outline_pip: sg.Pipeline = .{};
 // plain sprite, never the whole seam. Indexed by `effectIndex`.
 var effect_ready = [4]bool{ false, false, false, false };
 
+// EXHAUSTIVE (no `else`), like every material-effect switch in this file: a
+// new `MaterialEffect` member must fail to compile here rather than silently
+// half-wire (report unready → permanent plain-sprite degrade).
 fn effectIndex(effect: MaterialEffect) ?usize {
     return switch (effect) {
         .flash => 0,
         .palette_swap => 1,
         .dissolve => 2,
         .outline => 3,
-        else => null,
+        .none => null,
     };
 }
 
@@ -493,7 +501,9 @@ pub fn drawTextureProMaterial(
                 lut_smp = texture.smp;
             }
         },
-        else => {},
+        // EXHAUSTIVE: a new effect must decide its unit-1 aux story here at
+        // compile time, not silently inherit "no aux".
+        .flash, .outline, .none => {},
     }
 
     // Backend has no shader dialect here, or GPU-object build failed → plain.
@@ -687,12 +697,15 @@ pub fn flush() void {
     while (i < queue_len) : (i += 1) {
         const d = queue[i];
         if (!effectReady(d.effect)) continue; // defensive; the draw site gated
+        // EXHAUSTIVE: a new effect must be routed to its pipeline here at
+        // compile time. `.none` can't be queued (gated at the draw site and by
+        // `effectReady` above) — skip defensively rather than bind a dead pip.
         const pip = switch (d.effect) {
             .flash => flash_pip,
             .palette_swap => palette_pip,
             .dissolve => dissolve_pip,
             .outline => outline_pip,
-            else => continue,
+            .none => continue,
         };
         sg.applyPipeline(pip);
 
@@ -743,7 +756,7 @@ test "materialCapabilities advertises all four curated effects" {
             .palette_swap => has[1] = true,
             .dissolve => has[2] = true,
             .outline => has[3] = true,
-            else => {},
+            .none => {},
         }
     }
     try std.testing.expect(has[0] and has[1] and has[2] and has[3]);
