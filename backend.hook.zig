@@ -394,10 +394,45 @@ pub const EmLinkOptions = struct {
     extra_args: []const []const u8 = &.{},
 };
 
+/// Where `emTool` resolves an emscripten tool from.
+const EmToolResolution = union(enum) {
+    /// An external `EMSDK` is set and the tool exists in its managed layout.
+    managed: []const u8,
+    /// No usable external override; use the emsdk build dependency.
+    dep,
+};
+
+/// Pure decision behind `emTool`. An external EMSDK is an override only when
+/// its managed tool exists, so stale or incomplete environments do not shadow
+/// the package dependency. The filesystem is injected to keep this testable
+/// without downloading an SDK.
+fn emToolPath(gpa: std.mem.Allocator, env_emsdk: ?[]const u8, tool: []const u8, fs: anytype) EmToolResolution {
+    const root = env_emsdk orelse return .dep;
+    if (root.len == 0) return .dep;
+
+    const abs = std.fs.path.join(gpa, &.{ root, "upstream", "emscripten", tool }) catch return .dep;
+    if (fs.exists(abs)) return .{ .managed = abs };
+    gpa.free(abs);
+    return .dep;
+}
+
 /// Path to an emscripten tool (e.g. `emcc`) inside the resolved emsdk dependency.
-/// Mirrors sokol-zig's `emTool`/`emSdkLazyPath`.
+/// Prefers a studio-managed external EMSDK when its tool exists, then falls back
+/// to the dependency. The returned path remains lazy in the build graph.
 fn emTool(b: *std.Build, emsdk: *std.Build.Dependency, tool: []const u8) std.Build.LazyPath {
-    return emsdk.path(b.fmt("upstream/emscripten/{s}", .{tool}));
+    const BuildFs = struct {
+        b: *std.Build,
+
+        fn exists(self: @This(), path: []const u8) bool {
+            return if (std.Io.Dir.cwd().access(self.b.graph.io, path, .{})) |_| true else |_| false;
+        }
+    };
+    // Emscripten's Windows wrapper is the executable tool on that platform.
+    const actual_tool = if (builtin.os.tag == .windows) b.fmt("{s}.bat", .{tool}) else tool;
+    switch (emToolPath(b.allocator, b.graph.environ_map.get("EMSDK"), actual_tool, BuildFs{ .b = b })) {
+        .managed => |abs| return .{ .cwd_relative = abs },
+        .dep => return emsdk.path(b.fmt("upstream/emscripten/{s}", .{actual_tool})),
+    }
 }
 
 /// Reconstruction of sokol-zig's `emLinkStep` using only `std.Build` + the emsdk
@@ -627,6 +662,83 @@ test "wasm_stack_size_arg matches the enum .link_sokol_wasm 512 KB stack bump" {
     // typechecked against std.Build by compiling this file; this pins the one pure
     // decision it carries.
     try testing.expectEqualStrings("-sSTACK_SIZE=512KB", wasm_stack_size_arg);
+}
+
+test "emToolPath: unset and empty EMSDK use the dependency fallback" {
+    const Fs = struct {
+        fn exists(_: @This(), _: []const u8) bool {
+            return true;
+        }
+    };
+
+    switch (emToolPath(testing.allocator, null, "emcc", Fs{})) {
+        .dep => {},
+        .managed => |path| {
+            testing.allocator.free(path);
+            return error.TestUnexpectedManaged;
+        },
+    }
+    switch (emToolPath(testing.allocator, "", "emcc", Fs{})) {
+        .dep => {},
+        .managed => |path| {
+            testing.allocator.free(path);
+            return error.TestUnexpectedManaged;
+        },
+    }
+}
+
+test "emToolPath: existing managed EMSDK tool takes precedence" {
+    const Fs = struct {
+        fn exists(_: @This(), path: []const u8) bool {
+            return std.mem.endsWith(u8, path, "upstream/emscripten/emcc");
+        }
+    };
+    const root = "/home/u/.labelle/emsdk/4.0.0";
+
+    switch (emToolPath(testing.allocator, root, "emcc", Fs{})) {
+        .managed => |path| {
+            defer testing.allocator.free(path);
+            const expected = try std.fs.path.join(
+                testing.allocator,
+                &.{ root, "upstream", "emscripten", "emcc" },
+            );
+            defer testing.allocator.free(expected);
+            try testing.expectEqualStrings(expected, path);
+        },
+        .dep => return error.TestExpectedManaged,
+    }
+}
+
+test "emToolPath: missing managed tool falls back to dependency" {
+    const Fs = struct {
+        fn exists(_: @This(), _: []const u8) bool {
+            return false;
+        }
+    };
+
+    switch (emToolPath(testing.allocator, "/nonexistent/emsdk", "emcc", Fs{})) {
+        .dep => {},
+        .managed => |path| {
+            testing.allocator.free(path);
+            return error.TestUnexpectedManaged;
+        },
+    }
+}
+
+test "emToolPath: Windows wrapper name is preserved" {
+    const Fs = struct {
+        fn exists(_: @This(), path: []const u8) bool {
+            return std.mem.endsWith(u8, path, "emcc.bat");
+        }
+    };
+
+    switch (emToolPath(testing.allocator, "C:/emsdk", "emcc.bat", Fs{})) {
+        .managed => |path| {
+            defer testing.allocator.free(path);
+            try testing.expect(std.mem.endsWith(u8, path, "upstream/emscripten/emcc.bat"));
+        },
+        .dep => return error.TestExpectedManaged,
+    }
 }
 
 test "iosSdkName: -Ddevice picks iphoneos, else iphonesimulator" {
