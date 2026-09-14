@@ -210,3 +210,25 @@ const std = @import("std");
 test {
     std.testing.refAllDecls(font);
 }
+
+// Compile probe for the texture surface (labelle-gfx#328 P3).
+//
+// `gfx_compile_check` roots at THIS file, and Zig only analyses what is
+// reachable — so `gfx/texture.zig`'s function BODIES are never compiled by
+// `zig build test`. Verified before adding this: a deliberate type error in
+// that file passed the whole suite. Same hole as labelle-bgfx#73.
+//
+// The runtime-false guard forces analysis without executing anything; these
+// need a live sokol context, which unit tests do not have.
+test "compile probe: the texture surface is analysed" {
+    var never = false;
+    _ = &never;
+    if (never) {
+        const t = try texture.uploadTexture(undefined);
+        texture.unloadTexture(t);
+        _ = try texture.loadTexture(undefined);
+        _ = texture.isCompressed(undefined);
+        _ = texture.compressedDims(undefined);
+        _ = try texture.uploadCompressed(undefined);
+    }
+}

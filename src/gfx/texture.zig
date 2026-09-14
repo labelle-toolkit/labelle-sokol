@@ -246,7 +246,7 @@ pub fn uploadCompressed(data: []const u8) !Texture {
     }
 
     return Texture{
-        .id = img.id,
+        .id = @enumFromInt(img.id),
         .img = img,
         .view = view,
         .smp = smp,
@@ -291,7 +291,7 @@ fn createTextureFromRgba(pixels: []const u8, width: i32, height: i32) !Texture {
     }
 
     return Texture{
-        .id = img.id,
+        .id = @enumFromInt(img.id),
         .img = img,
         .view = view,
         .smp = smp,

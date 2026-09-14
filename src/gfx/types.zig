@@ -3,11 +3,18 @@
 /// imported by every other gfx submodule without creating cycles.
 const sokol = @import("sokol");
 const sg = sokol.gfx;
+const core = @import("labelle-core");
 
 // ── Backend types ──────────────────────────────────────────────────────
 
 pub const Texture = struct {
-    id: u32 = 0,
+    /// THIS BACKEND's texture identifier (the `sg.Image` id), deliberately
+    /// NOT the engine-facing `TextureId` that labelle-gfx's registry hands
+    /// out. Those are independent numbering spaces — sokol's is
+    /// `(gen_ctr << 16) | slot`, which is exactly why keying gfx's registry
+    /// by it collided with catalog handles (labelle-engine#813). Typed so the
+    /// two cannot be confused (RFC-TEXTURE-ID-TYPING, labelle-gfx#328).
+    id: core.BackendTextureId = .none,
     img: sg.Image = .{},
     view: sg.View = .{},
     smp: sg.Sampler = .{},
