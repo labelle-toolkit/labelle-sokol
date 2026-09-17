@@ -103,6 +103,13 @@ pub const drawText = font_atlas.drawText;
 // on an old core simply gets no materials — a quality degradation, never a
 // compile error. (bgfx does not gate today; it just isn't CI-built against an
 // old-core Android example that would trip it.)
+//
+// SCOPE OF THIS GATE: it answers "does the seam exist at all" (core >= v1.25.0)
+// and NOTHING about which effects the linked core's `MaterialEffect` carries.
+// Anything material.zig needs from a LATER core revision — e.g. the v1.32.0
+// `pixel_water` tag / `pixel_water_fn_decl` — must carry its own comptime probe
+// there (`has_pixel_water`), because an app core anywhere in v1.25–v1.31 passes
+// this gate and then gets the whole file analyzed.
 const core = @import("labelle-core");
 const has_material = @hasDecl(core.backend_contract, "MaterialEffect");
 pub const materialSupported = if (has_material) material.materialSupported else {};

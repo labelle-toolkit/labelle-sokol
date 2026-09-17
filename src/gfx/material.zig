@@ -49,6 +49,45 @@ const MaterialEffect = core.backend_contract.MaterialEffect;
 const MaterialUniforms = core.backend_contract.MaterialUniforms;
 const Material = core.backend_contract.Material;
 
+// ── The `pixel_water` contract probe + the new-tag guard ────────────────────
+//
+// THE CORE DIAMOND. This module's `labelle-core` is NOT this repo's own pin: a
+// generated game's `build_fragments/backend_dep.txt` does
+// `overrideImport(backend_gfx, "labelle-core", core_mod)`, so the core that
+// `MaterialEffect` comes from is whatever the GAME pins. gfx.zig's
+// `has_material` gate only asks whether `MaterialEffect` EXISTS (true from core
+// v1.25.0 on), so on an app core in v1.25–v1.31 this file IS analyzed while its
+// enum has no `pixel_water` tag and `backend_contract` has no
+// `pixel_water_fn_decl`. Naming either one unconditionally therefore breaks the
+// game's backend module — a skew that this repo's own `zig build test` (which
+// uses the pin above) can never reproduce. Hence a comptime probe for the
+// NEWER contract rather than for the seam merely existing.
+const has_pixel_water = @hasField(MaterialEffect, "pixel_water");
+
+// Every `MaterialEffect` tag this file knows how to route. The switches below
+// use `else` for the unsupported/degenerate group (naming `.pixel_water` in a
+// prong would not compile on an old core), which on its own would let a FUTURE
+// tag slip through as a silent "unsupported". This guard restores — and makes
+// explicit — the compile error the else-less switches used to give, on old and
+// new cores alike.
+const known_effects = [_][]const u8{
+    "none",        "flash", "palette_swap", "dissolve", "outline",
+    // core >= v1.32.0 (core#78). DECLINED by this backend: there is no sokol
+    // water shader, so it is routed into the same "unsupported" group as
+    // `.none` and never advertised in `materialCapabilities`.
+    "pixel_water",
+};
+comptime {
+    for (@typeInfo(MaterialEffect).@"enum".fields) |f| {
+        for (known_effects) |known| {
+            if (std.mem.eql(u8, f.name, known)) break;
+        } else @compileError("labelle-sokol material seam: unhandled MaterialEffect tag '" ++
+            f.name ++ "' — route it in src/gfx/material.zig (materialSupported, uniformSize, " ++
+            "effectIndex, drawTextureProMaterial's aux switch and flush's pipeline switch), " ++
+            "then add it to `known_effects`.");
+    }
+}
+
 // ── Backend-facing capability (contract decl) ───────────────────────────────
 
 /// Effect-level capability gate consumed by `core.Backend(Impl)` and
@@ -72,13 +111,16 @@ const Material = core.backend_contract.Material;
 pub fn materialSupported(effect: MaterialEffect) bool {
     const implemented = switch (effect) {
         .flash, .palette_swap, .dissolve, .outline => true,
-        // `pixel_water` is a bgfx-first effect (labelle-bgfx#100) riding its
-        // OWN optional contract decl (`drawTextureProPixelWater`), which this
-        // backend does NOT declare — there is no sokol water shader. Reported
-        // false here too so the RUNTIME gate agrees with the comptime manifest
-        // (`materialCapabilities` already drops it for the missing decl).
-        .pixel_water => false,
-        .none => false,
+        // `.none` (the no-material fast path) and — from core v1.32.0 —
+        // `.pixel_water`. The latter is a bgfx-first effect (labelle-bgfx#100)
+        // riding its OWN optional contract decl (`drawTextureProPixelWater`),
+        // which this backend does NOT declare: there is no sokol water shader.
+        // Reported false here too so the RUNTIME gate agrees with the comptime
+        // manifest (`materialCapabilities` already drops it for the missing
+        // decl). `else` rather than an explicit prong so this compiles against
+        // a pre-v1.32.0 app core as well — `known_effects` above is what makes
+        // an UNKNOWN future tag a compile error.
+        else => false,
     };
     if (!implemented) return false;
     if (@inComptime()) return true;
@@ -122,18 +164,19 @@ const MaterialFsParams = extern struct {
 };
 
 /// Byte size of the uniform block `effect`'s shader declares (see above).
-/// EXHAUSTIVE on purpose (no `else`): adding a new `MaterialEffect` must be a
-/// compile error here — a wildcard would silently upload the wrong block size.
+/// Every IMPLEMENTED effect is routed explicitly — a new `MaterialEffect` tag
+/// is still a compile error, via the `known_effects` guard at the top of this
+/// file, so no wildcard can silently upload the wrong block size.
 fn uniformSize(effect: MaterialEffect) usize {
     return switch (effect) {
         .flash, .palette_swap => 2 * @sizeOf([4]f32), // u_material[2] prefix
         .dissolve, .outline => @sizeOf(MaterialFsParams), // u_material[4]
-        // Never queued (materialSupported == false gates the draw site and
-        // `effectReady` re-gates in flush); smallest block if ever probed.
-        // Deliberately a benign value, NOT `unreachable`: this is a pure query
-        // any caller (or a test) may make for any tag, so an unsupported effect
-        // must answer harmlessly rather than panic.
-        .none, .pixel_water => 2 * @sizeOf([4]f32),
+        // `.none` + `.pixel_water`: never queued (materialSupported == false
+        // gates the draw site and `effectReady` re-gates in flush); smallest
+        // block if ever probed. Deliberately a benign value, NOT `unreachable`:
+        // this is a pure query any caller (or a test) may make for any tag, so
+        // an unsupported effect must answer harmlessly rather than panic.
+        else => 2 * @sizeOf([4]f32),
     };
 }
 
@@ -175,9 +218,10 @@ var outline_pip: sg.Pipeline = .{};
 // plain sprite, never the whole seam. Indexed by `effectIndex`.
 var effect_ready = [4]bool{ false, false, false, false };
 
-// EXHAUSTIVE (no `else`), like every material-effect switch in this file: a
-// new `MaterialEffect` member must fail to compile here rather than silently
-// half-wire (report unready → permanent plain-sprite degrade).
+// A new `MaterialEffect` member must fail to compile rather than silently
+// half-wire (report unready → permanent plain-sprite degrade) — enforced by the
+// `known_effects` guard at the top of this file, not by an else-less switch
+// (which could not name `.pixel_water` on a pre-v1.32.0 app core).
 fn effectIndex(effect: MaterialEffect) ?usize {
     return switch (effect) {
         .flash => 0,
@@ -188,7 +232,7 @@ fn effectIndex(effect: MaterialEffect) ?usize {
         // unsupported here (no shader). `null` is the genuinely CORRECT answer
         // — `effectReady` turns it into "not ready" → plain-sprite degrade —
         // so no `unreachable`.
-        .none, .pixel_water => null,
+        else => null,
     };
 }
 
@@ -514,12 +558,14 @@ pub fn drawTextureProMaterial(
                 lut_smp = texture.smp;
             }
         },
-        // EXHAUSTIVE: a new effect must decide its unit-1 aux story here at
-        // compile time, not silently inherit "no aux". `.pixel_water` never
-        // reaches here (the `materialSupported` gate above already returned
-        // via a plain sprite), but "no aux" is the harmless answer, and this
-        // seam's rule is degrade-never-crash.
-        .flash, .outline, .none, .pixel_water => {},
+        // `.flash` / `.outline` (no unit-1 aux), plus the unsupported group
+        // `.none` / `.pixel_water`, which never reach here at all (the
+        // `materialSupported` gate above already returned via a plain sprite).
+        // "No aux" is the harmless answer, and this seam's rule is
+        // degrade-never-crash. A new effect must still decide its unit-1 aux
+        // story at compile time — the `known_effects` guard at the top of this
+        // file is what enforces that now.
+        else => {},
     }
 
     // Backend has no shader dialect here, or GPU-object build failed → plain.
@@ -713,17 +759,18 @@ pub fn flush() void {
     while (i < queue_len) : (i += 1) {
         const d = queue[i];
         if (!effectReady(d.effect)) continue; // defensive; the draw site gated
-        // EXHAUSTIVE: a new effect must be routed to its pipeline here at
-        // compile time. `.none` and `.pixel_water` can't be queued (gated at
-        // the draw site and by `effectReady` above, which is false for both
-        // since `effectIndex` yields null) — skip defensively rather than bind
-        // a dead pip, or panic on a queue this module never fills.
+        // A new effect must be routed to its pipeline at compile time — the
+        // `known_effects` guard at the top of this file enforces that.
+        // `.none` and `.pixel_water` can't be queued (gated at the draw site
+        // and by `effectReady` above, which is false for both since
+        // `effectIndex` yields null) — skip defensively rather than bind a dead
+        // pip, or panic on a queue this module never fills.
         const pip = switch (d.effect) {
             .flash => flash_pip,
             .palette_swap => palette_pip,
             .dissolve => dissolve_pip,
             .outline => outline_pip,
-            .none, .pixel_water => continue,
+            else => continue,
         };
         sg.applyPipeline(pip);
 
@@ -767,10 +814,17 @@ test "materialSupported: the full curated set (only none is false)" {
 }
 
 test "pixel_water is declined: no water decl AND reported unsupported" {
+    // Only meaningful against a core that HAS the effect (>= v1.32.0). On an
+    // older app core — which this module must also compile against, see the
+    // core-diamond note at the top of this file — there is no tag and no
+    // `pixel_water_fn_decl` to probe, so there is nothing to decline.
+    if (comptime !has_pixel_water) return error.SkipZigTest;
+    const water: MaterialEffect = @field(MaterialEffect, "pixel_water");
+
     // MECHANISM, not just the value. `pixel_water` support is gated on the
     // OPTIONAL decl `drawTextureProPixelWater` (core `pixel_water_fn_decl`),
     // which this backend must NOT declare — there is no sokol water shader.
-    // Asserting only `!materialSupported(.pixel_water)` would still pass if
+    // Asserting only `!materialSupported(water)` would still pass if
     // someone added the decl without a shader, so assert BOTH halves:
     //   (a) the decl is absent on the Impl that owns the material seam, and
     //   (b) the contract's comptime introspection therefore omits the effect.
@@ -784,12 +838,37 @@ test "pixel_water is declined: no water decl AND reported unsupported" {
     // per-draw gate). The runtime call is safe WITHOUT a sokol context
     // precisely because the effect is unimplemented — it returns before
     // `sg.queryBackend()`.
-    try std.testing.expect(!comptime materialSupported(.pixel_water));
-    try std.testing.expect(!materialSupported(.pixel_water));
+    try std.testing.expect(!comptime materialSupported(water));
+    try std.testing.expect(!materialSupported(water));
     const water_caps = comptime core.backend_contract.materialCapabilities(@This());
     for (water_caps.effects) |e| {
-        try std.testing.expect(e != .pixel_water);
+        try std.testing.expect(e != water);
     }
+}
+
+test "the material seam compiles against a pre-v1.32.0 app core" {
+    // Guards the core-diamond regression this file's header describes: a
+    // generated game overrides THIS module's `labelle-core` with the GAME's
+    // core, so naming a v1.32.0-only tag (`.pixel_water`) or decl
+    // (`pixel_water_fn_decl`) unconditionally breaks every game on core
+    // v1.25–v1.31. The repo's own pin can't reproduce it, so assert the
+    // INVARIANT instead: nothing outside a `has_pixel_water` branch may depend
+    // on the newer contract.
+    //
+    // `known_effects` must stay a SUPERSET of the linked core's tags (that is
+    // exactly what the comptime guard at the top of the file checks), and the
+    // curated four this backend implements must be present on ANY core new
+    // enough to have the seam at all — `pixel_water` deliberately is not.
+    try std.testing.expect(@typeInfo(MaterialEffect).@"enum".fields.len <= known_effects.len);
+    try std.testing.expect(@hasField(MaterialEffect, "flash"));
+    try std.testing.expect(@hasField(MaterialEffect, "none"));
+    // The probe must track the linked core, not this repo's pin.
+    try std.testing.expectEqual(@hasField(MaterialEffect, "pixel_water"), has_pixel_water);
+    // Unsupported effects route through `else`, so `uniformSize`/`effectIndex`
+    // answer benignly for the degenerate tag that exists on EVERY core.
+    try std.testing.expectEqual(@as(usize, 32), uniformSize(.none));
+    try std.testing.expect(effectIndex(.none) == null);
+    try std.testing.expect(!comptime materialSupported(.none));
 }
 
 test "materialCapabilities advertises all four curated effects" {
@@ -806,8 +885,10 @@ test "materialCapabilities advertises all four curated effects" {
             .dissolve => has[2] = true,
             .outline => has[3] = true,
             // Neither is ever advertised: `.none` is not a capability and
-            // `.pixel_water` needs the water decl this backend declines.
-            .none, .pixel_water => {},
+            // `.pixel_water` (core >= v1.32.0) needs the water decl this
+            // backend declines. `else` so this test also compiles on an older
+            // app core, whose enum has no `pixel_water` tag to name.
+            else => {},
         }
     }
     try std.testing.expect(has[0] and has[1] and has[2] and has[3]);
@@ -822,7 +903,10 @@ test "MaterialFsParams matches the shader uniform block sizes" {
     try std.testing.expectEqual(@as(usize, 32), uniformSize(.flash));
     try std.testing.expectEqual(@as(usize, 32), uniformSize(.palette_swap));
     // Unsupported effects answer with the benign smallest block, never a panic.
-    try std.testing.expectEqual(@as(usize, 32), uniformSize(.pixel_water));
+    try std.testing.expectEqual(@as(usize, 32), uniformSize(.none));
+    if (comptime has_pixel_water) {
+        try std.testing.expectEqual(@as(usize, 32), uniformSize(@field(MaterialEffect, "pixel_water")));
+    }
     // The prefix layout the 32-byte upload relies on: color at 0, params at 16.
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(MaterialFsParams, "color"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(MaterialFsParams, "params"));

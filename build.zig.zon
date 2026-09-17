@@ -30,13 +30,20 @@
         // the udev/evdev gamepad STATE source (gamepad_source.Source.update/
         // isButtonDown/…, which landed in v1.16.0; v1.15.0 was detection-only).
         //
-        // FLOOR: v1.32.0. That release adds the 5th `MaterialEffect` tag
-        // `pixel_water` plus its own optional draw decl
-        // (`pixel_water_fn_decl` = "drawTextureProPixelWater", core#78). The
-        // else-less switches in src/gfx/material.zig now carry a
-        // `.pixel_water` arm, and the seam test asserts this backend does NOT
-        // declare that decl — both need the tag to exist, so an older core
-        // no longer compiles.
+        // v1.32.0 adds the 5th `MaterialEffect` tag `pixel_water` plus its own
+        // optional draw decl (`pixel_water_fn_decl` = "drawTextureProPixelWater",
+        // core#78), which src/gfx/material.zig declines.
+        //
+        // NOT A FLOOR. This pin is only what THIS repo's own `zig build test`
+        // compiles against; a generated game's `build_fragments/backend_dep.txt`
+        // overrides the gfx module's `labelle-core` with the GAME's core (the
+        // core diamond), so src/gfx/material.zig must keep compiling against any
+        // core from v1.25.0 — where the material seam first appears — on up. It
+        // does: the `pixel_water` tag and decl are reached only behind that
+        // file's `has_pixel_water` comptime probe, and the effect switches route
+        // the unsupported group through `else` rather than naming a tag older
+        // enums lack. Verified by building this repo against core v1.28.0 and
+        // v1.31.0 (the seam test skips there; everything else passes).
         .labelle_core = .{
             .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.32.0.tar.gz",
             .hash = "labelle_core-1.32.0-OauRcEK_BwBqC6MEsf3Bxqdo_kGeF2DRrwJbJWqspkoT",
