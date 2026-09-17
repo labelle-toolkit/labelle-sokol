@@ -52,7 +52,7 @@
     // manifests with `ignore_unknown_fields = true`, so this forward-looking
     // field is inert until the resolve-side mirror lands. Mirrors
     // labelle-bgfx v0.12.0's manifest field.
-    // NOT advertised: `pixel_water` (core >= v1.27.0, labelle-bgfx#100). It is
+    // NOT advertised: `pixel_water` (core >= v1.32.0, labelle-bgfx#100). It is
     // the one curated effect whose support is not implied by
     // `drawTextureProMaterial` — it rides its own optional
     // `drawTextureProPixelWater` decl, which this backend does not declare (no

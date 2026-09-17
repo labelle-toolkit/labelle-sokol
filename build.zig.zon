@@ -29,9 +29,17 @@
         // (core#33), imported DIRECTLY by input.zig as `labelle-core` to reach
         // the udev/evdev gamepad STATE source (gamepad_source.Source.update/
         // isButtonDown/…, which landed in v1.16.0; v1.15.0 was detection-only).
+        //
+        // FLOOR: v1.32.0. That release adds the 5th `MaterialEffect` tag
+        // `pixel_water` plus its own optional draw decl
+        // (`pixel_water_fn_decl` = "drawTextureProPixelWater", core#78). The
+        // else-less switches in src/gfx/material.zig now carry a
+        // `.pixel_water` arm, and the seam test asserts this backend does NOT
+        // declare that decl — both need the tag to exist, so an older core
+        // no longer compiles.
         .labelle_core = .{
-            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.26.0.tar.gz",
-            .hash = "labelle_core-1.26.0-OauRcDwJBwDfNc5x2S_FBwPrTztNUb_8Ie4HSq8XUoAM",
+            .url = "https://github.com/labelle-toolkit/labelle-core/archive/refs/tags/v1.32.0.tar.gz",
+            .hash = "labelle_core-1.32.0-OauRcEK_BwBqC6MEsf3Bxqdo_kGeF2DRrwJbJWqspkoT",
         },
         .sokol = .{
             // ⚠ LOCKSTEP: this commit MUST equal labelle-imgui's sokol
@@ -87,7 +95,7 @@
         // on it: gfx deps `labelle-core`, sokol deps `labelle-core`, and
         // labelle-gfx is BACKEND-AGNOSTIC (deps core, NOT sokol), so there is no
         // cycle. build.zig overrides labelle-gfx's own `labelle-core` onto the
-        // sokol backend's core pin (v1.26.0) so the diamond unifies at the SOURCE
+        // sokol backend's core pin (v1.32.0) so the diamond unifies at the SOURCE
         // level — otherwise `PostPass`/`RenderTargetId` from gfx's core instance
         // would not type-check against sokol's core instance and
         // `PostFxDriver(gfx_backend)` wouldn't compile. Desktop/macOS only (the
