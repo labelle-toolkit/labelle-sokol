@@ -209,4 +209,13 @@ pub const unloadFontAtlas = font.unloadFontAtlas;
 const std = @import("std");
 test {
     std.testing.refAllDecls(font);
+    // The material seam's own tests (the capability gate + the contract
+    // introspection, including the `pixel_water` decline) live in
+    // `gfx/material.zig`. The `pub const` re-exports above are LAZY (each is
+    // `if (has_material) material.<decl> else {}`), so they did not make Zig
+    // analyze the file and its tests were silently never discovered — this
+    // explicit reference is what puts them in the binary. Comptime-known
+    // condition, so on an old core (no material seam) the branch is not
+    // analyzed at all.
+    if (has_material) std.testing.refAllDecls(material);
 }

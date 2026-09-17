@@ -45,6 +45,12 @@
     // `flash`, `palette_swap`, `dissolve`, `outline` (src/gfx/material.zig).
     // Inert until the resolve-side mirror lands (`ignore_unknown_fields`).
     // Mirrors labelle-bgfx v0.12.0's manifest field.
+    // NOT advertised: `pixel_water` (core >= v1.27.0, labelle-bgfx#100). It is
+    // the one curated effect whose support is not implied by
+    // `drawTextureProMaterial` — it rides its own optional
+    // `drawTextureProPixelWater` decl, which this backend does not declare (no
+    // sokol water shader). It is therefore correctly absent from
+    // `core.materialCapabilities(sokolImpl)` too.
     .material_effects = .{ .flash, .palette_swap, .dissolve, .outline },
 
     // Curated full-screen post-fx passes this backend implements (labelle-gfx#305
