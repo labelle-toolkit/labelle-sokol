@@ -219,6 +219,30 @@ pub fn unloadSound(sound: Sound) void {
     Audio.unloadSound(sound.slot_index);
 }
 
+// ── Null audio device (headless / device-less hosts) ───────────────────
+
+/// Route audio through the null device: the mixer and the whole control
+/// surface stay live, but no sokol_audio device is ever opened.
+///
+/// Defaults to on under `builtin.is_test` (see `audio/sink.zig`), which is what
+/// keeps the unit tests off real hardware. This is the knob for the OTHER case:
+/// a headless or dedicated-server build on a machine with no sound card, where
+/// the first `uploadSound` would otherwise reach `saudio.setup` and — on the
+/// ALSA backend with no card — abort rather than degrade.
+///
+/// `audio.zig` is the module root consumers import, and it holds the sink as a
+/// private `const`, so without this re-export the switch would be unreachable
+/// from outside the package. Call it BEFORE the first audio entry point: once
+/// a real device is open, flipping this does not close it.
+pub fn setNullDevice(enable: bool) void {
+    SokolSink.null_device = enable;
+}
+
+/// Whether audio is currently routed through the null device.
+pub fn usingNullDevice() bool {
+    return SokolSink.null_device;
+}
+
 // ── Test aggregation ───────────────────────────────────────────────────
 //
 // The build.zig's `audio_compile_check` runs `b.addTest({ .root_module =

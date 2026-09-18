@@ -46,8 +46,12 @@ const labelle_audio = @import("labelle-audio");
 /// condition would let Zig drop the un-taken branch from semantic analysis, so
 /// in a test build the real `saudio.setup` path would stop being type-checked —
 /// silently gutting what `audio_compile_check` is for. A single predictable
-/// bool load on an already-idempotent path is a fair price. It is also `pub` so
-/// a headless/dedicated-server build can opt out of audio hardware on purpose.
+/// bool load on an already-idempotent path is a fair price.
+///
+/// Consumers import `audio.zig` (the module root), which holds this file as a
+/// private `const`, so the switch is re-exported there as
+/// `audio.setNullDevice` / `audio.usingNullDevice` for headless and
+/// dedicated-server builds that want to opt out of audio hardware on purpose.
 pub var null_device: bool = builtin.is_test;
 
 /// Opt into the shared mixer's f32 render path. This single decl is what makes

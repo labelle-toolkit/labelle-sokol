@@ -85,13 +85,23 @@ fn mkModule(
 }
 
 /// True when `t` is the machine running the build, i.e. its binaries can be
-/// executed here. Deliberately compares the triple rather than asking whether
-/// the *query* was native, so an explicit `-Dtarget=<this machine>` is still
-/// recognised as the host and does not build a redundant second graph.
+/// executed here. Compares the triple rather than asking whether the *query*
+/// was native, so an explicit `-Dtarget=<this machine>` is still recognised as
+/// the host and does not build a redundant second graph.
+///
+/// The CPU model AND feature set are part of the comparison, not just the
+/// arch: `-Dcpu=x86_64_v4` on a host triple resolves to the host's os/arch/abi
+/// while producing binaries that use instructions this machine may not have,
+/// and reusing those under `test-host` would trade a "foreign binary" error for
+/// a SIGILL. Anything that is not an exact match falls through to building a
+/// genuinely host-native graph, which is always correct — just occasionally
+/// redundant.
 fn targetIsHost(t: std.Target) bool {
     return t.cpu.arch == builtin.target.cpu.arch and
         t.os.tag == builtin.target.os.tag and
-        t.abi == builtin.target.abi;
+        t.abi == builtin.target.abi and
+        t.cpu.model == builtin.target.cpu.model and
+        t.cpu.features.eql(builtin.target.cpu.features);
 }
 
 /// Build the whole sokol backend module graph for `target`.
@@ -579,6 +589,13 @@ pub fn build(b: *std.Build) void {
     else host_blk: {
         var host_opts = backend_opts;
         host_opts.register = false; // anonymous copies: the names are taken
+        // `dont_link_system_libs` is a MOBILE-only escape hatch (iOS links its
+        // frameworks by hand). The host graph is a desktop build that genuinely
+        // needs sokol's system libs, so carrying the flag over from, say,
+        // `-Dtarget=aarch64-linux-android -Ddont_link_system_libs=true` would
+        // leave the host test artifacts unlinkable. The requested-target graph
+        // keeps the caller's value; only this host copy resets it.
+        host_opts.dont_link_system_libs = false;
         const host_backend = addBackendGraph(b, host_target, optimize, host_opts);
         break :host_blk .{
             b.addTest(.{ .root_module = host_backend.audio_mod }),
