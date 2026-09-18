@@ -477,7 +477,7 @@ pub fn build(b: *std.Build) void {
         // sokol deps `labelle-core`, and labelle-gfx is BACKEND-AGNOSTIC (deps
         // core, NOT sokol), so there is no cycle. We MUST override labelle-gfx's
         // own `labelle-core` onto the sokol backend's core module (`gfx_core_mod`,
-        // v1.26.0) so the diamond unifies at the SOURCE level — otherwise
+        // v1.32.0) so the diamond unifies at the SOURCE level — otherwise
         // `PostPass`/`RenderTargetId` from gfx's core instance would not type-check
         // against the sokol backend's core instance and `PostFxDriver(gfx)`
         // wouldn't compile (the same core-unify seam the material seam added).
