@@ -49,60 +49,79 @@ fn dirExists(path: []const u8) bool {
 pub const EmLinkOptions = @import("sokol").EmLinkOptions;
 pub const emLinkStep = @import("sokol").emLinkStep;
 
-pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{});
+/// Knobs the backend module graph is parameterised by. `register` is the only
+/// one that is not a user option: the PRIMARY graph publishes its modules under
+/// their public names (consumers do `dep.module("gfx")`), while the extra
+/// host-target graph `test-host` builds is anonymous — a second `b.addModule`
+/// under the same name would clash.
+const BackendOptions = struct {
+    with_imgui: bool,
+    dont_link_system_libs: bool,
+    gamepad_enabled: bool,
+    gamepad_hidapi: bool,
+    register: bool,
+};
 
-    // Forward dont_link_system_libs for iOS builds — we link frameworks manually.
-    const dont_link_system_libs = b.option(bool, "dont_link_system_libs", "Don't link system libraries (for iOS cross-compilation)") orelse false;
+/// Everything `build()` needs back out of `addBackendGraph`.
+const BackendGraph = struct {
+    sokol_mod: *std.Build.Module,
+    sokol_clib: *std.Build.Step.Compile,
+    gfx_mod: *std.Build.Module,
+    gfx_core_mod: *std.Build.Module,
+    input_mod: *std.Build.Module,
+    audio_mod: *std.Build.Module,
+    window_mod: *std.Build.Module,
+    sdl_gp_mod: ?*std.Build.Module,
+};
 
-    // Opt-in `with_sokol_imgui` switch — only the imgui-plugin path
-    // needs sokol_imgui.c compiled. Forcing it on for every project
-    // breaks no-gui builds because sokol_imgui.c `#include`s
-    // `cimgui.h`, which only the imgui bridge provides on the include
-    // path. WASM-without-imgui was the canonical regression
-    // (`sokol_imgui.c:8:10: error: 'cimgui.h' file not found`); session
-    // smoke testing surfaced it.
-    //
-    // IMPORTANT: when `with_imgui=true`, the option set passed here
-    // MUST match `labelle-imgui/bridges/sokol/build.zig` exactly. Zig
-    // keys each `b.dependency("sokol", .{...})` resolution by the
-    // option set, so mismatched options produce *two* separately
-    // compiled `sokol_clib` artifacts in the same binary — and
-    // therefore two copies of the `_sg` static state. Symptom: sgl
-    // draws land in the IOSurface pass but simgui draws don't
-    // (different state machines). Symmetric option list = one
-    // artifact = one `_sg` (labelle-assembler#140). The assembler's
-    // generated build.zig flips `with_imgui` on only when the project
-    // has the imgui plugin in its gui config.
-    //
-    // `with_sokol_imgui_no_app` stays unconditional on every target
-    // EXCEPT Android because sokol-zig gates its cflag on the outer
-    // `with_sokol_imgui` already — it's a harmless no-op when imgui is
-    // off, and keeps the option set identical to the bridge's when
-    // imgui is on. Android is the exception: the device runs sokol_app
-    // natively (no headless preview), and the freshly-fetched sokol-zig
-    // hasn't been patched with the option, so passing it trips
-    // `error: invalid option: -Dwith_sokol_imgui_no_app`. The matching
-    // skip in `labelle-imgui/bridges/sokol/build.zig` keeps the option
-    // sets symmetric on Android too (still one `sokol_clib` artifact,
-    // one `_sg`). See labelle-assembler#146.
-    const with_imgui = b.option(bool, "with_imgui", "Build sokol with sokol_imgui (must match imgui bridge if used)") orelse false;
+/// `b.addModule` (published under `name`) or an anonymous `b.createModule`.
+fn mkModule(
+    b: *std.Build,
+    register: bool,
+    name: []const u8,
+    options: std.Build.Module.CreateOptions,
+) *std.Build.Module {
+    return if (register) b.addModule(name, options) else b.createModule(options);
+}
+
+/// True when `t` is the machine running the build, i.e. its binaries can be
+/// executed here. Deliberately compares the triple rather than asking whether
+/// the *query* was native, so an explicit `-Dtarget=<this machine>` is still
+/// recognised as the host and does not build a redundant second graph.
+fn targetIsHost(t: std.Target) bool {
+    return t.cpu.arch == builtin.target.cpu.arch and
+        t.os.tag == builtin.target.os.tag and
+        t.abi == builtin.target.abi;
+}
+
+/// Build the whole sokol backend module graph for `target`.
+///
+/// Factored out of `build()` so it can be instantiated TWICE: once for the
+/// requested `-Dtarget` (the modules consumers import), and — when that target
+/// is foreign — a second time for the HOST, so `test-host` has test artifacts
+/// it can actually execute (see the `test-host` step). One source of truth, so
+/// the two graphs cannot drift.
+fn addBackendGraph(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    opts: BackendOptions,
+) BackendGraph {
     const is_android = target.result.abi == .android or target.result.abi == .androideabi;
     const sokol_dep = if (is_android)
         b.dependency("sokol", .{
             .target = target,
             .optimize = optimize,
-            .with_sokol_imgui = with_imgui,
-            .dont_link_system_libs = dont_link_system_libs,
+            .with_sokol_imgui = opts.with_imgui,
+            .dont_link_system_libs = opts.dont_link_system_libs,
         })
     else
         b.dependency("sokol", .{
             .target = target,
             .optimize = optimize,
-            .with_sokol_imgui = with_imgui,
+            .with_sokol_imgui = opts.with_imgui,
             .with_sokol_imgui_no_app = true,
-            .dont_link_system_libs = dont_link_system_libs,
+            .dont_link_system_libs = opts.dont_link_system_libs,
         });
     const sokol_mod = sokol_dep.module("sokol");
     const sokol_clib = sokol_dep.artifact("sokol_clib");
@@ -131,8 +150,8 @@ pub fn build(b: *std.Build) void {
     // The assembler forwards this via `b.dependency(..., .gamepad_enabled)`.
     // Gated so that when opted out, `labelle_sdl_gamepad` is not even resolved
     // as a dependency (the generated zon no longer declares it).
-    const gamepad_enabled = b.option(bool, "gamepad_enabled", "Wire the shared SDL desktop gamepad source + link SDL2 (default true; false = opt out, no SDL)") orelse true;
-    const gamepad_hidapi = b.option(bool, "gamepad_hidapi", "Opt the SDL gamepad source into HIDAPI raw-HID decode (Switch/8BitDo); default false — HIDAPI per-connect init stalls the render thread for seconds on some platforms") orelse false;
+    const gamepad_enabled = opts.gamepad_enabled;
+    const gamepad_hidapi = opts.gamepad_hidapi;
 
     // Gated on `gamepad_enabled` AND a desktop target: non-desktop sokol builds
     // (Android/iOS/wasm) never use the SDL source, so don't resolve/require it
@@ -155,7 +174,7 @@ pub fn build(b: *std.Build) void {
     input_opts.addOption(bool, "gamepad_hidapi", gamepad_hidapi);
 
     // ── Gfx backend module ──────────────────────────────────────────
-    const gfx_mod = b.addModule("gfx", .{
+    const gfx_mod = mkModule(b, opts.register, "gfx", .{
         .root_source_file = b.path("src/gfx.zig"),
         .target = target,
         .optimize = optimize,
@@ -200,7 +219,7 @@ pub fn build(b: *std.Build) void {
     gfx_mod.addCSourceFile(.{ .file = b.path("src/stb_truetype_impl.c"), .flags = &.{} });
 
     // ── Input backend module ────────────────────────────────────────
-    const input_mod = b.addModule("input", .{
+    const input_mod = mkModule(b, opts.register, "input", .{
         .root_source_file = b.path("src/input.zig"),
         .target = target,
         .optimize = optimize,
@@ -288,7 +307,7 @@ pub fn build(b: *std.Build) void {
     }
 
     // ── Audio backend module ────────────────────────────────────────
-    const audio_mod = b.addModule("audio", .{
+    const audio_mod = mkModule(b, opts.register, "audio", .{
         .root_source_file = b.path("src/audio.zig"),
         .target = target,
         .optimize = optimize,
@@ -333,7 +352,7 @@ pub fn build(b: *std.Build) void {
     // callback) wasn't worth it for a 60-line writer. See bmp.zig's
     // header comment and the matching libc shims in gfx/texture.zig and
     // audio/legacy.zig (PR #218).
-    const window_mod = b.addModule("window", .{
+    const window_mod = mkModule(b, opts.register, "window", .{
         .root_source_file = b.path("src/window.zig"),
         .target = target,
         .optimize = optimize,
@@ -344,6 +363,84 @@ pub fn build(b: *std.Build) void {
     // (labelle-gfx#305), so it imports the SAME gfx module instance the game
     // imports — module-level material-queue state is shared.
     window_mod.addImport("gfx", gfx_mod);
+
+    return .{
+        .sokol_mod = sokol_mod,
+        .sokol_clib = sokol_clib,
+        .gfx_mod = gfx_mod,
+        .gfx_core_mod = gfx_core_mod,
+        .input_mod = input_mod,
+        .audio_mod = audio_mod,
+        .window_mod = window_mod,
+        .sdl_gp_mod = sdl_gp_mod,
+    };
+}
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    // Forward dont_link_system_libs for iOS builds — we link frameworks manually.
+    const dont_link_system_libs = b.option(bool, "dont_link_system_libs", "Don't link system libraries (for iOS cross-compilation)") orelse false;
+
+    // Opt-in `with_sokol_imgui` switch — only the imgui-plugin path
+    // needs sokol_imgui.c compiled. Forcing it on for every project
+    // breaks no-gui builds because sokol_imgui.c `#include`s
+    // `cimgui.h`, which only the imgui bridge provides on the include
+    // path. WASM-without-imgui was the canonical regression
+    // (`sokol_imgui.c:8:10: error: 'cimgui.h' file not found`); session
+    // smoke testing surfaced it.
+    //
+    // IMPORTANT: when `with_imgui=true`, the option set passed here
+    // MUST match `labelle-imgui/bridges/sokol/build.zig` exactly. Zig
+    // keys each `b.dependency("sokol", .{...})` resolution by the
+    // option set, so mismatched options produce *two* separately
+    // compiled `sokol_clib` artifacts in the same binary — and
+    // therefore two copies of the `_sg` static state. Symptom: sgl
+    // draws land in the IOSurface pass but simgui draws don't
+    // (different state machines). Symmetric option list = one
+    // artifact = one `_sg` (labelle-assembler#140). The assembler's
+    // generated build.zig flips `with_imgui` on only when the project
+    // has the imgui plugin in its gui config.
+    //
+    // `with_sokol_imgui_no_app` stays unconditional on every target
+    // EXCEPT Android because sokol-zig gates its cflag on the outer
+    // `with_sokol_imgui` already — it's a harmless no-op when imgui is
+    // off, and keeps the option set identical to the bridge's when
+    // imgui is on. Android is the exception: the device runs sokol_app
+    // natively (no headless preview), and the freshly-fetched sokol-zig
+    // hasn't been patched with the option, so passing it trips
+    // `error: invalid option: -Dwith_sokol_imgui_no_app`. The matching
+    // skip in `labelle-imgui/bridges/sokol/build.zig` keeps the option
+    // sets symmetric on Android too (still one `sokol_clib` artifact,
+    // one `_sg`). See labelle-assembler#146.
+    const with_imgui = b.option(bool, "with_imgui", "Build sokol with sokol_imgui (must match imgui bridge if used)") orelse false;
+
+    // Desktop gamepad source toggle (core#28 slice 5) — see the full rationale
+    // at its use site in `addBackendGraph`. Declared here because `b.option` may
+    // only be called once per option, and the graph is built up to twice.
+    const gamepad_enabled = b.option(bool, "gamepad_enabled", "Wire the shared SDL desktop gamepad source + link SDL2 (default true; false = opt out, no SDL)") orelse true;
+    const gamepad_hidapi = b.option(bool, "gamepad_hidapi", "Opt the SDL gamepad source into HIDAPI raw-HID decode (Switch/8BitDo); default false — HIDAPI per-connect init stalls the render thread for seconds on some platforms") orelse false;
+
+    const backend_opts: BackendOptions = .{
+        .with_imgui = with_imgui,
+        .dont_link_system_libs = dont_link_system_libs,
+        .gamepad_enabled = gamepad_enabled,
+        .gamepad_hidapi = gamepad_hidapi,
+        .register = true,
+    };
+
+    // The PRIMARY graph: built for the requested `-Dtarget`, modules published
+    // under their public names for consumers.
+    const backend = addBackendGraph(b, target, optimize, backend_opts);
+    const sokol_mod = backend.sokol_mod;
+    const sokol_clib = backend.sokol_clib;
+    const gfx_mod = backend.gfx_mod;
+    const gfx_core_mod = backend.gfx_core_mod;
+    const input_mod = backend.input_mod;
+    const audio_mod = backend.audio_mod;
+    const window_mod = backend.window_mod;
+    const sdl_gp_mod = backend.sdl_gp_mod;
 
     // ── Re-export the native artifact so consumers can link it ──────
     b.installArtifact(sokol_clib);
@@ -463,16 +560,39 @@ pub fn build(b: *std.Build) void {
     //
     // Historical alias, kept so existing invocations and docs keep working.
     // It used to be the ONLY step that executed assertions; since #21 `test`
-    // runs them too, so this is now the same set, forced to the host (no
-    // foreign skip: asking for `test-host` explicitly means "actually run
-    // them here").
+    // runs them too, so this is now the same set — but forced to the HOST and
+    // with no foreign skip: asking for `test-host` explicitly means "actually
+    // run them here".
+    //
+    // "Forced to the host" has to be literal. `audio_compile_check` and friends
+    // are built off the modules for the REQUESTED `-Dtarget`, so reusing them
+    // under `-Dtarget=aarch64-linux-android` had `test-host` trying to execute
+    // Android binaries on the build machine. When the requested target is not
+    // the host we therefore build a SECOND, host-target backend graph and test
+    // off that — same `addBackendGraph` source of truth, just a different
+    // target, and completely independent of the `test` step's
+    // `skip_foreign_checks` degradation. When the requested target IS the host
+    // (the overwhelmingly common case, including plain `zig build test-host`)
+    // the existing artifacts are reused, so nothing is compiled twice.
+    const host_checks: [3]*std.Build.Step.Compile = if (targetIsHost(target.result))
+        .{ audio_compile_check, gfx_compile_check, input_compile_check }
+    else host_blk: {
+        var host_opts = backend_opts;
+        host_opts.register = false; // anonymous copies: the names are taken
+        const host_backend = addBackendGraph(b, host_target, optimize, host_opts);
+        break :host_blk .{
+            b.addTest(.{ .root_module = host_backend.audio_mod }),
+            b.addTest(.{ .root_module = host_backend.gfx_mod }),
+            b.addTest(.{ .root_module = host_backend.input_mod }),
+        };
+    };
+
     const test_host_step = b.step(
         "test-host",
-        "Run the sokol backend unit tests natively (needs sokol's system libs). Same set as `test`.",
+        "Run the sokol backend unit tests natively (needs sokol's system libs). Same set as `test`, always built for the host.",
     );
-    test_host_step.dependOn(&b.addRunArtifact(audio_compile_check).step);
-    test_host_step.dependOn(&b.addRunArtifact(gfx_compile_check).step);
-    test_host_step.dependOn(&b.addRunArtifact(input_compile_check).step);
+    for (host_checks) |check| test_host_step.dependOn(&b.addRunArtifact(check).step);
+    // `astc_run` is already host-targeted by construction.
     test_host_step.dependOn(&b.addRunArtifact(astc_run).step);
 
     // ── Material golden harness (labelle-gfx#305, Phase 3 — full set) ────────
