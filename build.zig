@@ -349,7 +349,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(sokol_clib);
 
     // ── Unit tests ──────────────────────────────────────────────────
-    const test_step = b.step("test", "Run sokol backend unit tests");
+    const test_step = b.step("test", "Run sokol backend unit tests (compiles AND executes them; runs are skipped for a foreign -Dtarget)");
 
     // The audio slot/mixer/decode state-transition tests that used to live in
     // `src/audio_slots.zig` (the #10 unloaded-slot leak lock, #110/#111 slot
@@ -374,29 +374,43 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(astc_run).step);
 
-    // Compile-check audio.zig via a test binary off audio_mod. This
-    // pulls in the full sokol module graph so it only works when the
-    // host has sokol's system libs installed (libasound, libGL, libX11,
-    // libXi, libXcursor on Linux). Depending on the compile step keeps
-    // this useful for cross-compile (the binary doesn't need to run);
-    // the host_audio_tests step below adds the run side for native.
+    // audio.zig's tests (decodeAudio dispatching on file_type, Sound layout
+    // invariants, the OGG/WAV decoder) via a test binary off audio_mod. This
+    // pulls in the full sokol module graph so it only builds when the host has
+    // sokol's system libs installed (libasound, libGL, libX11, libXi,
+    // libXcursor on Linux).
     const audio_compile_check = b.addTest(.{ .root_module = audio_mod });
-    test_step.dependOn(&audio_compile_check.step);
 
-    // Compile-check gfx.zig — same trick as `audio_compile_check`.
-    // Verifies the Phase 4 font surface (`FontAtlas`, `decodeFont`,
-    // `uploadFontAtlas`, `unloadFontAtlas`) keeps compiling against
-    // sokol_gfx + stb_truetype.
+    // gfx.zig's tests — same trick as `audio_compile_check`. Covers the Phase 4
+    // font surface (`FontAtlas`, `decodeFont`, `uploadFontAtlas`,
+    // `unloadFontAtlas`) plus the material seam (`gfx/material.zig`) and the
+    // render-target/post-fx seam, all reached through gfx.zig's `test {}` block
+    // (the lazy `if (has_*) ...` re-exports alone do NOT make Zig analyze those
+    // files — see #20).
     const gfx_compile_check = b.addTest(.{ .root_module = gfx_mod });
-    test_step.dependOn(&gfx_compile_check.step);
 
-    // Compile-check input.zig — pulls in sokol_app + (on Android) the JNI
+    // input.zig's tests — pulls in sokol_app + (on Android) the JNI
     // gamepad-detection C glue. Regression lock for labelle-assembler#248:
-    // verifies the back-key policy compiles and, on the Android target, that
-    // `android_gamepad_jni.c` links into the input module graph. Like the
-    // other checks this only builds the binary (cross-compile safe).
+    // verifies the back-key policy, and on the Android target that
+    // `android_gamepad_jni.c` links into the input module graph.
     const input_compile_check = b.addTest(.{ .root_module = input_mod });
-    test_step.dependOn(&input_compile_check.step);
+
+    // The three checks above declare real assertions, so `test` RUNS them
+    // (#21: it used to depend only on the compile steps, which build the test
+    // binary without ever executing a single assertion — a failing test exited
+    // 0). `skip_foreign_checks` keeps the cross-compile flow working: for a
+    // target the host cannot execute (e.g. `-Dtarget=aarch64-linux-android`)
+    // the run is skipped and the compile-check alone stands, exactly as before.
+    const test_runs = [_]*std.Build.Step.Compile{
+        audio_compile_check,
+        gfx_compile_check,
+        input_compile_check,
+    };
+    for (test_runs) |check| {
+        const run = b.addRunArtifact(check);
+        run.skip_foreign_checks = true;
+        test_step.dependOn(&run.step);
+    }
 
     // ── Cross-compile SDL-gating object (core#28) ───────────────────────
     // Emits ONLY the gamepad-routing surface as an object for the requested
@@ -437,27 +451,29 @@ pub fn build(b: *std.Build) void {
     // `d3d11.zig`, `bmp.zig`). Regression lock for the screenshot
     // implementation (labelle-assembler#213); without this the four
     // helper files were unreached by any test target.
+    //
+    // COMPILE-ONLY BY DESIGN: window.zig and the screenshot helpers declare no
+    // tests — this target exists purely so the files are type-checked and the
+    // per-backend readback helpers stay reachable. There is nothing to execute,
+    // so no run artifact is wired (#21).
     const window_compile_check = b.addTest(.{ .root_module = window_mod });
     test_step.dependOn(&window_compile_check.step);
 
-    // ── Phase 4 host-native test runs ────────────────────────────────
+    // ── `test-host` ──────────────────────────────────────────────────
     //
-    // The compile-checks above only ensure the bytecode builds. The
-    // Phase 4 decoder unit tests (decodeFont rejecting empty/garbage
-    // input, decodeAudio dispatching on file_type, Sound layout
-    // invariants) are pure-CPU and exercise no sokol API — they're
-    // safe to run on the host target when the user explicitly asks
-    // for it. Wired off a separate `test-host` step rather than
-    // `test` so the default cross-compile flow stays linker-free.
+    // Historical alias, kept so existing invocations and docs keep working.
+    // It used to be the ONLY step that executed assertions; since #21 `test`
+    // runs them too, so this is now the same set, forced to the host (no
+    // foreign skip: asking for `test-host` explicitly means "actually run
+    // them here").
     const test_host_step = b.step(
         "test-host",
-        "Run Phase 4 decoder unit tests natively (needs sokol's system libs).",
+        "Run the sokol backend unit tests natively (needs sokol's system libs). Same set as `test`.",
     );
     test_host_step.dependOn(&b.addRunArtifact(audio_compile_check).step);
     test_host_step.dependOn(&b.addRunArtifact(gfx_compile_check).step);
-    // input.zig's pure keyboard-edge tests (back-key policy + the #263
-    // key-repeat regression) call no sokol API, so run them natively too.
     test_host_step.dependOn(&b.addRunArtifact(input_compile_check).step);
+    test_host_step.dependOn(&b.addRunArtifact(astc_run).step);
 
     // ── Material golden harness (labelle-gfx#305, Phase 3 — full set) ────────
     // `zig build material-golden`       — render the FIXED 10-column scene
