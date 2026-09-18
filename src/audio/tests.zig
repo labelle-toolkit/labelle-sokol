@@ -4,12 +4,25 @@
 //! itself (the shared mixer). These thin tests confirm the sokol adapter wires
 //! the shared mixer correctly (forwarding + the `uploadSound`/`unloadSound`
 //! Phase 4 marshalling) and that the kept OGG/WAV decoder still rejects bad
-//! input. Exercised headlessly: `SokolSink.ensureStarted` degrades to a silent
-//! no-op when sokol_audio can't validate a device (CI has no speaker), so the
-//! mixer's slot bookkeeping is testable without audio hardware.
+//! input.
+//!
+//! ## Why these run without a sound card
+//! `uploadSound` goes through the shared mixer's `ensureInit`, which drives
+//! `SokolSink.ensureStarted` — i.e. the real sokol_audio device. On a machine
+//! with no sound card the ALSA backend does not degrade gracefully, it ABORTS
+//! (`cannot find card '0'` → SIGABRT), which is how these tests died on CI the
+//! moment #21 made `zig build test` actually execute them.
+//!
+//! So `sink.zig` carries a null-device fixture (`SokolSink.null_device`,
+//! defaulting to `builtin.is_test`): the mixer is wired and the sink reports as
+//! started, but no hardware is opened. Every assertion below still runs — a
+//! fixture rather than `error.SkipZigTest`, because a skip would preserve the
+//! exact "no coverage" state #21 exists to fix. The first test asserts the
+//! fixture is the path taken, not merely that the results look right.
 const std = @import("std");
 const audio = @import("../audio.zig");
 const decode = @import("decode.zig");
+const sink = @import("sink.zig");
 
 const testing = std.testing;
 
@@ -17,6 +30,27 @@ const testing = std.testing;
 // `Sound` extern-layout lock) into this aggregation root.
 test {
     testing.refAllDecls(decode);
+}
+
+test "the audio suite runs on the null-device fixture, not real hardware" {
+    // MECHANISM assertion. The tests below would pass identically on a laptop
+    // with working speakers, so asserting their return values proves nothing
+    // about CI. Assert instead which path `ensureStarted` took: an upload must
+    // have started the sink WITHOUT opening a sokol_audio device. If this ever
+    // fails, the Linux CI job is about to SIGABRT in ALSA again.
+    try testing.expect(sink.null_device);
+
+    var samples = [_]i16{ 1, 2 };
+    const sound = try audio.uploadSound(.{
+        .samples = &samples,
+        .sample_rate = 44100,
+        .channels = 1,
+    });
+    defer audio.unloadSound(sound);
+
+    try testing.expect(sink.isStarted()); // the mixer DID drive ensureStarted
+    try testing.expect(!sink.isRealDeviceOpen()); // ...but opened no hardware
+    try testing.expectEqual(@as(u64, 0), sink.framesMixed()); // no device thread
 }
 
 test "uploadSound rejects zero-channel DecodedAudio" {

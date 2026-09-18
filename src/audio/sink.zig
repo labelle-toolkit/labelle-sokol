@@ -21,9 +21,38 @@
 //!   * `framesMixed() u64` — cumulative frames pushed through the callback.
 //!   * `pub const sample_format: SampleFormat = .f32` — opt into the f32 path.
 const std = @import("std");
+const builtin = @import("builtin");
 const sokol = @import("sokol");
 const saudio = sokol.audio;
 const labelle_audio = @import("labelle-audio");
+
+/// **Null-device mode** — the device-independent test fixture (#22 review).
+///
+/// When true, `ensureStarted` wires the mixer callback and reports the sink as
+/// started WITHOUT opening a sokol_audio device. Everything above the device —
+/// the shared mixer's slot pool, `uploadSound`/`unloadSound` marshalling, the
+/// whole `AudioInterface` control surface — behaves exactly as it does with a
+/// real device; only the speaker is missing.
+///
+/// Defaults to `builtin.is_test`, so `zig build test` / `test-host` never touch
+/// audio hardware. That is not cosmetic: the sokol_audio ALSA backend on a
+/// machine with no sound card (every Linux CI runner) aborts out of
+/// `saudio.setup` — `cannot find card '0'` → SIGABRT — which is precisely how
+/// the audio tests died once #21 made `zig build test` actually execute them.
+/// A null device is preferred over `error.SkipZigTest` because a skip would
+/// preserve the "these assertions never run" status quo that #21 exists to end.
+///
+/// It is a runtime `var`, not a comptime constant, on purpose: a comptime-known
+/// condition would let Zig drop the un-taken branch from semantic analysis, so
+/// in a test build the real `saudio.setup` path would stop being type-checked —
+/// silently gutting what `audio_compile_check` is for. A single predictable
+/// bool load on an already-idempotent path is a fair price.
+///
+/// Consumers import `audio.zig` (the module root), which holds this file as a
+/// private `const`, so the switch is re-exported there as
+/// `audio.setNullDevice` / `audio.usingNullDevice` for headless and
+/// dedicated-server builds that want to opt out of audio hardware on purpose.
+pub var null_device: bool = builtin.is_test;
 
 /// Opt into the shared mixer's f32 render path. This single decl is what makes
 /// `Mixer(SokolSink)` render the mix into `[]f32` and wire `ensureStarted` to a
@@ -44,6 +73,12 @@ const DEVICE_CHANNELS: i32 = 2;
 // audio callback thread, and it never reads this). Atomic anyway for safe
 // publication of the device's started state.
 var device_started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
+// Whether a REAL sokol_audio device is open (i.e. `saudio.setup` ran and the
+// device validated). Distinct from `device_started`, which is also true in
+// null-device mode: `stop()` must not call `saudio.shutdown` on a device that
+// was never set up.
+var real_device_open: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 // The mixer supplied by the shared `Mixer`, published before the device starts
 // and read on the audio thread. Stored as a nullable so a stray callback
@@ -99,6 +134,16 @@ pub fn ensureStarted(mix: MixFn) void {
     // observes a null `mix_fn`.
     mix_fn = mix;
 
+    if (null_device) {
+        // Null-device fixture: the sink is "started" (the mixer is wired and
+        // the control surface is live) but no sokol_audio device is opened, so
+        // nothing here needs a sound card. `framesMixed` stays 0 — with no
+        // device thread there is no stream callback to count.
+        device_started.store(true, .release);
+        std.log.info("audio: sokol_audio null device (no hardware opened)", .{});
+        return;
+    }
+
     saudio.setup(.{
         .num_channels = DEVICE_CHANNELS,
         .sample_rate = DEVICE_SAMPLE_RATE,
@@ -107,6 +152,7 @@ pub fn ensureStarted(mix: MixFn) void {
     });
 
     if (saudio.isvalid()) {
+        real_device_open.store(true, .release);
         device_started.store(true, .release);
         std.log.info(
             "audio: sokol_audio device started: {d}Hz {d}ch f32",
@@ -127,17 +173,36 @@ pub fn ensureStarted(mix: MixFn) void {
 /// safe to call unconditionally, and is *required* to reset sokol_audio's
 /// internal setup state even if the device later became invalid.
 pub fn stop() void {
-    if (device_started.load(.acquire)) {
+    if (!device_started.load(.acquire)) return;
+    // Only tear down a device that was actually set up. In null-device mode
+    // `saudio.setup` never ran, and `saudio.shutdown` asserts `setup_called`.
+    if (real_device_open.load(.acquire)) {
         saudio.shutdown();
-        device_started.store(false, .release);
-        std.log.info(
-            "audio: sokol_audio device stopped ({d} frames mixed)",
-            .{frames_mixed.load(.monotonic)},
-        );
+        real_device_open.store(false, .release);
     }
+    device_started.store(false, .release);
+    std.log.info(
+        "audio: sokol_audio device stopped ({d} frames mixed)",
+        .{frames_mixed.load(.monotonic)},
+    );
 }
 
 /// Cumulative frames pushed through the device callback so far.
 pub fn framesMixed() u64 {
     return frames_mixed.load(.monotonic);
+}
+
+/// Whether the sink is started — true for a live sokol_audio device AND for the
+/// null-device fixture. Introspection for tests/diagnostics; not part of the
+/// `DeviceSink` contract.
+pub fn isStarted() bool {
+    return device_started.load(.acquire);
+}
+
+/// Whether a REAL sokol_audio device is open. Lets a test assert which path
+/// `ensureStarted` actually took, rather than only that the outcome looked
+/// right — the null-device fixture and a working speaker produce identical
+/// mixer-side results, so a value-only assertion would be vacuous.
+pub fn isRealDeviceOpen() bool {
+    return real_device_open.load(.acquire);
 }
