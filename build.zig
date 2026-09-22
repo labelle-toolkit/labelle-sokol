@@ -84,24 +84,23 @@ fn mkModule(
     return if (register) b.addModule(name, options) else b.createModule(options);
 }
 
-/// True when `t` is the machine running the build, i.e. its binaries can be
-/// executed here. Compares the triple rather than asking whether the *query*
-/// was native, so an explicit `-Dtarget=<this machine>` is still recognised as
-/// the host and does not build a redundant second graph.
+/// Whether `test-host` may REUSE the artifacts built for the requested
+/// `-Dtarget` instead of building a second, host-native graph.
 ///
-/// The CPU model AND feature set are part of the comparison, not just the
-/// arch: `-Dcpu=x86_64_v4` on a host triple resolves to the host's os/arch/abi
-/// while producing binaries that use instructions this machine may not have,
-/// and reusing those under `test-host` would trade a "foreign binary" error for
-/// a SIGILL. Anything that is not an exact match falls through to building a
-/// genuinely host-native graph, which is always correct — just occasionally
-/// redundant.
-fn targetIsHost(t: std.Target) bool {
-    return t.cpu.arch == builtin.target.cpu.arch and
-        t.os.tag == builtin.target.os.tag and
-        t.abi == builtin.target.abi and
-        t.cpu.model == builtin.target.cpu.model and
-        t.cpu.features.eql(builtin.target.cpu.features);
+/// True only when no target was requested at all (`-Dtarget` absent, or
+/// `native`): then the requested graph IS the host graph by construction.
+/// Any explicit target — even one spelling the host's own triple and CPU —
+/// builds the host graph afresh. That is occasionally redundant and always
+/// correct, which is the right trade for a predicate whose failure mode is
+/// `test-host` executing a binary the machine cannot run.
+///
+/// The previous version compared arch/os/abi/cpu model/cpu features and was
+/// still wrong (labelle-sokol#23): it ignored `os.version_range`, so
+/// `-Dtarget=aarch64-macos.15` on a macOS 14 host counted as "the host" and
+/// reused a binary the OS may refuse to execute. Comparing one more field
+/// would fix one more case; not comparing is what fixes the class.
+fn targetIsHost(t: std.Build.ResolvedTarget) bool {
+    return t.query.isNative();
 }
 
 /// Build the whole sokol backend module graph for `target`.
@@ -584,7 +583,7 @@ pub fn build(b: *std.Build) void {
     // `skip_foreign_checks` degradation. When the requested target IS the host
     // (the overwhelmingly common case, including plain `zig build test-host`)
     // the existing artifacts are reused, so nothing is compiled twice.
-    const host_checks: [3]*std.Build.Step.Compile = if (targetIsHost(target.result))
+    const host_checks: [3]*std.Build.Step.Compile = if (targetIsHost(target))
         .{ audio_compile_check, gfx_compile_check, input_compile_check }
     else host_blk: {
         var host_opts = backend_opts;
