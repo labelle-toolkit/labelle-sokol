@@ -492,7 +492,8 @@ else
 /// `launch_intent_env.apply()` is called from the top of the generated
 /// `sokol_main()` (templates/mobile.txt) so `labelle run --platform=android
 /// --scene=X` reaches the engine's `getenv`. Comptime no-op off Android, so the
-/// re-export is unconditional (and its pure allow-list tests run on the host).
+/// re-export is unconditional (and the pure allow-list / decision tests in
+/// `android_intent_env.zig` run on the host).
 pub const launch_intent_env = @import("launch_intent_env.zig");
 
 /// One-shot guard so we register the Android forwarded-gamepad callback with
