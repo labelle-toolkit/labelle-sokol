@@ -52,8 +52,9 @@ pub fn isAllowed(name: []const u8) bool {
 pub const Action = union(enum) {
     /// `setenv(name, value, 1)`.
     set: [:0]const u8,
-    /// `unsetenv(name)`: a value WE set on an earlier launch of this process.
-    unset,
+    /// Undo what an earlier launch of this process set: restore the value
+    /// the environment had before it, or `unsetenv` if there was none.
+    revert,
     /// Leave the environment alone.
     keep,
 };
@@ -61,27 +62,42 @@ pub const Action = union(enum) {
 /// Decide what one key does, given its extra (null = absent) and whether an
 /// earlier launch in this process already set it from an intent.
 ///
-/// The `unset` case matters because Android can keep the process alive after
+/// The `revert` case matters because Android can keep the process alive after
 /// the activity is destroyed; a relaunch then reuses the old environment, and
-/// a plain launch after `--scene=X` would boot X again. Only values we set are
-/// cleared: one that came from the real environment (`wrap.<package>`) stays.
-/// An empty extra counts as absent, as it does for `requestedScene()`.
+/// a plain launch after `--scene=X` would boot X again. Only what we set is
+/// undone, back to the value from the real environment (`wrap.<package>`) if
+/// there was one. An empty extra counts as absent, as it does for
+/// `requestedScene()`.
 pub fn action(key: Key, extra: ?[:0]const u8, debuggable: bool, set_by_intent: bool) Action {
     if (extra) |v| {
         if (v.len > 0 and (!key.debuggable_only or debuggable)) return .{ .set = v };
     }
-    return if (set_by_intent) .unset else .keep;
+    return if (set_by_intent) .revert else .keep;
 }
 
-/// Which keys this process has set from an intent so far (see `action`).
+/// Longest pre-existing value `State` can save for a later `revert`. Longer
+/// ones are never overridden (see `apply`), so they are never lost either.
+pub const max_original_len = 511;
+
+/// Which keys this process has set from an intent so far (see `action`), and
+/// what each held before the first of those launches overrode it.
 pub const State = struct {
     set_by_intent: [keys.len]bool = @splat(false),
+    /// Length of the saved pre-intent value, or null if the key was unset.
+    original_len: [keys.len]?usize = @splat(null),
+    original_buf: [keys.len][max_original_len + 1]u8 = undefined,
+
+    fn original(self: *const State, i: usize) ?[:0]const u8 {
+        const len = self.original_len[i] orelse return null;
+        return self.original_buf[i][0..len :0];
+    }
 };
 
 /// Apply one launch's extras (`extras[i]` belongs to `keys[i]`). `env`
-/// provides `set(name, value) bool`, `unset(name) void` and `debuggable()
-/// bool`; the last is asked only when a debuggable-only key is present, so a
-/// plain launch costs no JNI round-trip for it.
+/// provides `get(name) ?[:0]const u8`, `set(name, value) bool`, `unset(name)
+/// void` and `debuggable() bool`; the last is asked only when a
+/// debuggable-only key is present, so a plain launch costs no JNI round-trip
+/// for it.
 pub fn apply(state: *State, extras: [keys.len]?[:0]const u8, env: anytype) void {
     var debuggable: ?bool = null;
     for (keys, extras, 0..) |key, extra, i| {
@@ -91,15 +107,34 @@ pub fn apply(state: *State, extras: [keys.len]?[:0]const u8, env: anytype) void 
         } else false;
         switch (action(key, extra, allowed, state.set_by_intent[i])) {
             .set => |v| {
+                // First override in this process: save what the environment
+                // had, so a later launch without the extra can put it back.
+                if (!state.set_by_intent[i]) {
+                    state.original_len[i] = null;
+                    if (env.get(key.name)) |orig| {
+                        if (orig.len > max_original_len) {
+                            std.log.info("sokol: keeping {s} from the environment (too long to save); intent extra ignored", .{key.name});
+                            continue;
+                        }
+                        @memcpy(state.original_buf[i][0..orig.len], orig);
+                        state.original_buf[i][orig.len] = 0;
+                        state.original_len[i] = orig.len;
+                    }
+                }
                 if (env.set(key.name, v)) {
                     state.set_by_intent[i] = true;
                     std.log.info("sokol: {s}={s} (launch intent extra)", .{ key.name, v });
                 }
             },
-            .unset => {
-                env.unset(key.name);
+            .revert => {
+                if (state.original(i)) |orig| {
+                    _ = env.set(key.name, orig);
+                    std.log.info("sokol: {s} restored to {s} (set by a previous launch's intent)", .{ key.name, orig });
+                } else {
+                    env.unset(key.name);
+                    std.log.info("sokol: {s} cleared (set by a previous launch's intent)", .{key.name});
+                }
                 state.set_by_intent[i] = false;
-                std.log.info("sokol: {s} cleared (set by a previous launch's intent)", .{key.name});
             },
             .keep => if (extra != null and key.debuggable_only and !allowed and extra.?.len > 0) {
                 std.log.info("sokol: ignoring intent extra {s}: the apk is not debuggable", .{key.name});
@@ -131,12 +166,12 @@ const FakeEnv = struct {
     pub fn unset(self: *FakeEnv, name: [:0]const u8) void {
         self.vars[index(name)] = null;
     }
+    pub fn get(self: *const FakeEnv, name: [:0]const u8) ?[:0]const u8 {
+        return self.vars[index(name)];
+    }
     pub fn debuggable(self: *FakeEnv) bool {
         self.debuggable_calls += 1;
         return self.is_debuggable;
-    }
-    fn get(self: *const FakeEnv, name: [:0]const u8) ?[:0]const u8 {
-        return self.vars[index(name)];
     }
 };
 
@@ -225,7 +260,7 @@ test "a relaunch in the same process clears what the previous intent set" {
     try testing.expect(!state.set_by_intent[0]);
 }
 
-test "a value from the real environment is never cleared" {
+test "a value from the real environment is never lost" {
     var state: State = .{};
     // Set through `wrap.<package>`, not by us.
     var env: FakeEnv = .{};
@@ -233,18 +268,35 @@ test "a value from the real environment is never cleared" {
     apply(&state, @splat(null), &env);
     try testing.expectEqualStrings("1", env.get("LABELLE_PROFILE").?);
 
-    // An intent value does override it (the launch is the more specific ask).
+    // An intent value does override it (the launch is the more specific ask)...
     apply(&state, extrasWith(&.{.{ "LABELLE_PROFILE", "0" }}), &env);
     try testing.expectEqualStrings("0", env.get("LABELLE_PROFILE").?);
+    // ...a second override keeps the ORIGINAL saved, not the first override...
+    apply(&state, extrasWith(&.{.{ "LABELLE_PROFILE", "2" }}), &env);
+    try testing.expectEqualStrings("2", env.get("LABELLE_PROFILE").?);
+    // ...and a launch without it restores the real value rather than unsetting.
+    apply(&state, @splat(null), &env);
+    try testing.expectEqualStrings("1", env.get("LABELLE_PROFILE").?);
+    try testing.expect(!state.set_by_intent[FakeEnv.index("LABELLE_PROFILE")]);
 }
 
-test "action: set / unset / keep" {
+test "a real value too long to save is kept, not overridden" {
+    var state: State = .{};
+    var env: FakeEnv = .{};
+    const long: [:0]const u8 = "x" ** (max_original_len + 1);
+    env.vars[FakeEnv.index("LABELLE_SCENE")] = long;
+    apply(&state, extrasWith(&.{.{ "LABELLE_SCENE", "menu" }}), &env);
+    try testing.expectEqualStrings(long, env.get("LABELLE_SCENE").?);
+    try testing.expect(!state.set_by_intent[FakeEnv.index("LABELLE_SCENE")]);
+}
+
+test "action: set / revert / keep" {
     const scene = keys[0];
     const shot = keys[2];
     try testing.expectEqualStrings("x", action(scene, "x", false, false).set);
     try testing.expectEqual(Action.keep, action(scene, null, false, false));
-    try testing.expectEqual(Action.unset, action(scene, null, false, true));
+    try testing.expectEqual(Action.revert, action(scene, null, false, true));
     try testing.expectEqual(Action.keep, action(shot, "p", false, false));
-    try testing.expectEqual(Action.unset, action(shot, "p", false, true));
+    try testing.expectEqual(Action.revert, action(shot, "p", false, true));
     try testing.expectEqualStrings("p", action(shot, "p", true, false).set);
 }

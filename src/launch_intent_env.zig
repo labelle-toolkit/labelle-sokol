@@ -46,6 +46,7 @@ extern "c" fn labelle_sokol_read_intent_extras(
     lens: [*]c_int,
 ) c_int;
 extern "c" fn labelle_sokol_app_is_debuggable(activity: ?*const anyopaque) c_int;
+extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 
@@ -61,6 +62,9 @@ var buf: [4096]u8 = undefined;
 const LibcEnv = struct {
     activity: ?*const anyopaque,
 
+    pub fn get(_: LibcEnv, name: [:0]const u8) ?[:0]const u8 {
+        return if (getenv(name.ptr)) |v| std.mem.span(v) else null;
+    }
     pub fn set(_: LibcEnv, name: [:0]const u8, value: [:0]const u8) bool {
         return setenv(name.ptr, value.ptr, 1) == 0;
     }

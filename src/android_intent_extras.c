@@ -64,9 +64,10 @@ int labelle_sokol_read_intent_extras(const void *activity_ptr, const char *const
     if (env == NULL) return 0;
 
     int ok = 0;
-    // Room for the activity class, intent, its class and, per key, the key and
-    // value strings; the frame hands them all back in one pop.
-    if ((*env)->PushLocalFrame(env, 4 + 2 * count) == JNI_OK) {
+    // Room for the activity class, intent, its class, the String class, the
+    // "UTF-8" charset name and, per key, the key string, the value string and
+    // its UTF-8 byte array; the frame hands them all back in one pop.
+    if ((*env)->PushLocalFrame(env, 6 + 3 * count) == JNI_OK) {
         jclass activity_cls = (*env)->GetObjectClass(env, activity);
         jmethodID get_intent = activity_cls ? (*env)->GetMethodID(env, activity_cls, "getIntent", "()Landroid/content/Intent;") : NULL;
         // A launcher-icon launch still has an intent, just no extras; null only
@@ -75,7 +76,14 @@ int labelle_sokol_read_intent_extras(const void *activity_ptr, const char *const
         if (!(*env)->ExceptionCheck(env) && intent != NULL) {
             jclass intent_cls = (*env)->GetObjectClass(env, intent);
             jmethodID get_extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;
-            if (get_extra != NULL && !(*env)->ExceptionCheck(env)) {
+            // Values are encoded with `String.getBytes("UTF-8")`, NOT
+            // `GetStringUTFChars`: the latter yields JNI *modified* UTF-8
+            // (supplementary characters as CESU-8 surrogate pairs, U+0000 as
+            // C0 80), which would not match a UTF-8 scene name or path.
+            jclass string_cls = get_extra ? (*env)->FindClass(env, "java/lang/String") : NULL;
+            jmethodID get_bytes = string_cls ? (*env)->GetMethodID(env, string_cls, "getBytes", "(Ljava/lang/String;)[B") : NULL;
+            jstring utf8_name = get_bytes ? (*env)->NewStringUTF(env, "UTF-8") : NULL;
+            if (get_extra != NULL && utf8_name != NULL && !(*env)->ExceptionCheck(env)) {
                 ok = 1;
                 size_t used = 0;
                 for (int i = 0; i < count && ok; i++) {
@@ -92,20 +100,30 @@ int labelle_sokol_read_intent_extras(const void *activity_ptr, const char *const
                         break;
                     }
                     if (jval != NULL) {
-                        const char *chars = (*env)->GetStringUTFChars(env, jval, NULL);
-                        if (chars == NULL) {
-                            ok = 0; // OOM: an exception is pending
+                        jbyteArray bytes = (jbyteArray)(*env)->CallObjectMethod(env, jval, get_bytes, utf8_name);
+                        if (bytes == NULL || (*env)->ExceptionCheck(env)) {
+                            ok = 0;
                             break;
                         }
-                        size_t len = strlen(chars);
+                        jsize n = (*env)->GetArrayLength(env, bytes);
+                        size_t len = n > 0 ? (size_t)n : 0;
                         if (len + 1 <= buf_cap - used) {
-                            memcpy(buf + used, chars, len + 1);
-                            lens[i] = (int)len;
-                            used += len + 1;
+                            (*env)->GetByteArrayRegion(env, bytes, 0, n, (jbyte *)(buf + used));
+                            if ((*env)->ExceptionCheck(env)) {
+                                ok = 0;
+                                break;
+                            }
+                            // An embedded NUL cannot live in an env var;
+                            // treat such an extra as absent rather than
+                            // silently truncating it.
+                            if (memchr(buf + used, 0, len) == NULL) {
+                                buf[used + len] = 0;
+                                lens[i] = (int)len;
+                                used += len + 1;
+                            }
                         } else {
                             lens[i] = -2;
                         }
-                        (*env)->ReleaseStringUTFChars(env, jval, chars);
                     }
                 }
             }
