@@ -90,6 +90,14 @@ export fn cleanup() callconv(.c) void {
 export fn sokol_main(argc: c_int, argv: [*][*:0]u8) window.Desc {
     _ = argc;
     _ = argv;
+    // Launch-intent `LABELLE_*` extras → env vars (labelle-sokol#25), so
+    // `labelle run --platform=android --scene=X` (`am start … --es
+    // LABELLE_SCENE X`) reaches the engine's `getenv`. FIRST, because sokol
+    // calls sokol_main() on the UI thread with the activity already set but
+    // before the render thread (and so `init()` / `AssembledGame.init` / the
+    // engine's env reads) exists. Allow-listed keys only; comptime no-op off
+    // Android; a launch with no extras sets nothing.
+    @import("backend_input").launch_intent_env.apply();
 {{immersive_entry}}    return window.makeDesc(.{
         .init_cb = &init,
         .frame_cb = &frame,
