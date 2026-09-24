@@ -73,6 +73,10 @@ int labelle_sokol_read_intent_extras(const void *activity_ptr, const char *const
         // A launcher-icon launch still has an intent, just no extras; null only
         // if something unusual cleared it. Either way "no extras" is the answer.
         jobject intent = (get_intent && !(*env)->ExceptionCheck(env)) ? (*env)->CallObjectMethod(env, activity, get_intent) : NULL;
+        // So a null intent (the call itself succeeded) is a successful read
+        // with every `lens[i]` still -1, which lets the Zig side revert values
+        // an earlier launch set; only a JNI failure reports 0.
+        if (get_intent != NULL && intent == NULL && !(*env)->ExceptionCheck(env)) ok = 1;
         if (!(*env)->ExceptionCheck(env) && intent != NULL) {
             jclass intent_cls = (*env)->GetObjectClass(env, intent);
             jmethodID get_extra = intent_cls ? (*env)->GetMethodID(env, intent_cls, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;") : NULL;

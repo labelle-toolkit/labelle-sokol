@@ -128,7 +128,12 @@ pub fn apply(state: *State, extras: [keys.len]?[:0]const u8, env: anytype) void 
             },
             .revert => {
                 if (state.original(i)) |orig| {
-                    _ = env.set(key.name, orig);
+                    if (!env.set(key.name, orig)) {
+                        // Keep the ownership flag so the next launch retries
+                        // the restore instead of leaving the intent value.
+                        std.log.warn("sokol: could not restore {s}; will retry on the next launch", .{key.name});
+                        continue;
+                    }
                     std.log.info("sokol: {s} restored to {s} (set by a previous launch's intent)", .{ key.name, orig });
                 } else {
                     env.unset(key.name);
@@ -152,6 +157,8 @@ const FakeEnv = struct {
     vars: [keys.len]?[:0]const u8 = @splat(null),
     is_debuggable: bool = false,
     debuggable_calls: usize = 0,
+    /// When true, `set` fails (as a real `setenv` can on ENOMEM).
+    fail_set: bool = false,
 
     fn index(name: [:0]const u8) usize {
         for (keys, 0..) |k, i| {
@@ -160,6 +167,7 @@ const FakeEnv = struct {
         unreachable; // apply() only ever names allow-listed keys
     }
     pub fn set(self: *FakeEnv, name: [:0]const u8, value: [:0]const u8) bool {
+        if (self.fail_set) return false;
         self.vars[index(name)] = value;
         return true;
     }
@@ -275,6 +283,27 @@ test "a value from the real environment is never lost" {
     apply(&state, extrasWith(&.{.{ "LABELLE_PROFILE", "2" }}), &env);
     try testing.expectEqualStrings("2", env.get("LABELLE_PROFILE").?);
     // ...and a launch without it restores the real value rather than unsetting.
+    apply(&state, @splat(null), &env);
+    try testing.expectEqualStrings("1", env.get("LABELLE_PROFILE").?);
+    try testing.expect(!state.set_by_intent[FakeEnv.index("LABELLE_PROFILE")]);
+}
+
+test "a failed restore keeps ownership so the next launch retries it" {
+    var state: State = .{};
+    var env: FakeEnv = .{};
+    env.vars[FakeEnv.index("LABELLE_PROFILE")] = "1"; // from the real environment
+    apply(&state, extrasWith(&.{.{ "LABELLE_PROFILE", "0" }}), &env);
+    try testing.expectEqualStrings("0", env.get("LABELLE_PROFILE").?);
+
+    // Plain relaunch, but setenv fails: the intent value is still there and
+    // the key must stay owned by the intent.
+    env.fail_set = true;
+    apply(&state, @splat(null), &env);
+    try testing.expectEqualStrings("0", env.get("LABELLE_PROFILE").?);
+    try testing.expect(state.set_by_intent[FakeEnv.index("LABELLE_PROFILE")]);
+
+    // Next plain launch succeeds and restores the original.
+    env.fail_set = false;
     apply(&state, @splat(null), &env);
     try testing.expectEqualStrings("1", env.get("LABELLE_PROFILE").?);
     try testing.expect(!state.set_by_intent[FakeEnv.index("LABELLE_PROFILE")]);

@@ -90,6 +90,9 @@ pub fn apply() void {
     var lens: [intent_env.keys.len]c_int = undefined;
     if (labelle_sokol_read_intent_extras(activity, &names, names.len, &buf, buf.len, &lens) == 0) {
         std.log.warn("sokol: could not read the launch intent; LABELLE_* extras ignored", .{});
+        // Still revert what an earlier launch's intent set in this process
+        // (all-absent extras only ever revert/keep, never set).
+        intent_env.apply(&state, @splat(null), LibcEnv{ .activity = activity });
         return;
     }
     var extras: [intent_env.keys.len]?[:0]const u8 = @splat(null);
