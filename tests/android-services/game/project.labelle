@@ -1,0 +1,18 @@
+.{
+    .name = "intent_acceptance",
+    .title = "Intent acceptance",
+    .width = 640,
+    .height = 480,
+    .backend = .sokol,
+    .backend_package = .{ .name = "sokol", .repo = "local:../../.." },
+    .y_axis = .up,
+    .ecs = .mock,
+    .initial_prefab = "main",
+    .states = .{"playing"},
+    .core_version = "2.1.0",
+    .engine_version = "3.4.1",
+    .gfx_version = "2.2.0",
+    .assembler_version = "0.113.2",
+    .labelle_version = "1.75.0",
+    .android = .{ .app_name = "Intent acceptance", .package_name = "com.labelle.intent_acceptance", .min_sdk_version = 28, .target_sdk_version = 34 },
+}
