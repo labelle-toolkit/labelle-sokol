@@ -488,13 +488,15 @@ pub const android = if (builtin.target.abi == .android or builtin.target.abi == 
 else
     struct {};
 
-/// Android launch-intent `LABELLE_*` extras → env vars (labelle-sokol#25).
-/// `launch_intent_env.apply()` is called from the top of the generated
-/// `sokol_main()` (templates/mobile.txt) so `labelle run --platform=android
-/// --scene=X` reaches the engine's `getenv`. Comptime no-op off Android, so the
-/// re-export is unconditional (and the pure allow-list / decision tests in
-/// `android_intent_env.zig` run on the host).
-pub const launch_intent_env = @import("launch_intent_env.zig");
+/// Preserve the generated sokol_main() entry point while the shared Android
+/// package owns intent parsing, the debuggable gate and relaunch restoration.
+/// Run before the engine's first getenv. No Android dependency off Android.
+pub const launch_intent_env = struct {
+    pub fn apply() void {
+        if (comptime !agp.is_android) return;
+        @import("labelle_android").launch_intent.apply(sapp.androidGetNativeActivity());
+    }
+};
 
 /// One-shot guard so we register the Android forwarded-gamepad callback with
 /// the sokol fork exactly once, lazily, at the first frame. Registering here
@@ -530,9 +532,8 @@ pub fn newFrame() void {
 
 const std = @import("std");
 
-test {
-    // Pull the launch-intent allow-list tests into this module's test binary.
-    _ = launch_intent_env;
+test "launch intent entry point remains a no-op off Android" {
+    if (comptime !agp.is_android) launch_intent_env.apply();
 }
 
 test "isBackKey matches Android AKEYCODE_BACK only" {
