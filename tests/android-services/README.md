@@ -15,7 +15,9 @@ minimal NativeActivity APK with `android:debuggable=false`. It verifies that
 scene extras arrive, screenshot extras are rejected, and a second Activity
 launch with no extras clears the scene **in the same PID**. The native entry
 finishes each Activity without exiting its process; the launch counter proves
-that the library's process state survived. A failed assertion fails the script.
+that the library's process state survived. A failed assertion fails the script. If Android evicts the cached process, the
+script reports **INCONCLUSIVE** and exits 2; retry on an idle device. It never
+counts a fresh-process relaunch as proof of same-process cleanup.
 
 The separate `game/` fixture checks the actual sokol entry point and current
 engine scene consumer. Build games with the CLI:

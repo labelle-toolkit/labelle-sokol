@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build/install a non-debuggable service probe and verify a cached-process relaunch."""
 import argparse
+import atexit
+import sys
 import os
 from pathlib import Path
 import re
@@ -23,12 +25,22 @@ def run(*args, **kwargs):
     return subprocess.check_output(list(map(str, args)), text=True, stderr=subprocess.STDOUT, **kwargs)
 def logs():
     return run(*adb, 'logcat', '-d', '-s', 'SERVICE_ACCEPTANCE:I', '*:S')
-def await_log(launch):
+def classify(text, launch, previous_pid=None):
+    entries = re.findall(r'pid=(\d+) launch=(\d+) scene=(\S+) screenshot=(\S+) after=(\S+) debuggable=(\S+)', text)
+    for pid, count, *values in reversed(entries):
+        if previous_pid is not None and pid != previous_pid:
+            print('INCONCLUSIVE: Android replaced the cached process; retry on an idle device.', file=sys.stderr)
+            raise SystemExit(2)
+        if int(count) == launch:
+            return (pid, *values)
+    return None
+
+def await_log(launch, previous_pid=None):
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        found = re.search(r'pid=(\d+) launch=' + str(launch) + r' scene=(\S+) screenshot=(\S+) after=(\S+) debuggable=(\S+)', logs())
+        found = classify(logs(), launch, previous_pid)
         if found:
-            return found.groups()
+            return found
         time.sleep(.2)
     raise AssertionError(logs())
 run(a.zig, 'build', cwd=root)
@@ -45,6 +57,7 @@ with tempfile.TemporaryDirectory(prefix='labelle-services-') as temp:
     run(build_tools / 'apksigner', 'sign', '--ks', key, '--ks-key-alias', 'test', '--ks-pass', 'pass:android', aligned)
     subprocess.run(adb + ['uninstall', package], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     print(run(*adb, 'install', '--no-incremental', aligned).strip())
+    atexit.register(lambda: subprocess.run(adb + ['shell', 'am', 'force-stop', package], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     run(*adb, 'logcat', '-c')
     run(*adb, 'shell', 'am', 'start', '-W', '-n', package + '/android.app.NativeActivity', '--es', 'LABELLE_SCENE', 'probe', '--es', 'LABELLE_SCREENSHOT_PATH', '/sdcard/probe.png', '--es', 'LABELLE_SCREENSHOT_AFTER_SEC', '1')
     first = await_log(1)
@@ -52,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='labelle-services-') as temp:
     # The native entry finishes its Activity, deliberately leaving its process alive.
     time.sleep(1)
     run(*adb, 'shell', 'am', 'start', '-W', '-n', package + '/android.app.NativeActivity')
-    second = await_log(2)
+    second = await_log(2, previous_pid=first[0])
     assert second[0] == first[0], (first, second)
     assert second[1:] == ('<unset>', '<unset>', '<unset>', 'false'), second
     print(logs().strip())
