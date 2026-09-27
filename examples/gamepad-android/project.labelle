@@ -37,7 +37,7 @@
     // (NDK sysroot + PIC) support — the same bridge Flying Platform ships.
     .gui = .{ .plugin = "imgui" },
     .plugins = .{
-        .{ .name = "android", .repo = "labelle-toolkit/labelle-android", .version = "0.2.0" },
+        .{ .name = "android", .repo = "github.com/labelle-toolkit/labelle-android", .version = "0.2.0" },
         .{ .name = "imgui", .repo = "github.com/labelle-toolkit/labelle-imgui", .version = "0.10.0" },
     },
     .layers = .{
@@ -49,5 +49,5 @@
     .core_version = "2.1.0",
     .engine_version = "3.4.1",
     .gfx_version = "2.2.0",
-    .assembler_version = "0.116.0",
+    .assembler_version = "0.116.1",
 }

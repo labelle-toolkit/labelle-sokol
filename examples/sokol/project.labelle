@@ -27,10 +27,11 @@
         .{ .name = "world", .order = 1, .space = .world },
         .{ .name = "ui", .order = 2, .space = .screen },
     },
+    // `.android` keeps only assembler codegen keys (assembler v0.116+). APK
+    // packaging keys (app_name, package_name, min_sdk_version, ...) live in
+    // `providers/android.json`, read by the labelle-android provider; this is a
+    // desktop example, so it does not declare that provider.
     .android = .{
-        .app_name = "LaBelle Sokol Demo",
-        .package_name = "com.labelle.example_sokol",
-        .min_sdk_version = 28,
         .target_sdk_version = 34,
     },
     .core_version = "1.24.0",

@@ -1,14 +1,16 @@
 # Sokol Android provider fixture
 
 Uses the local Sokol backend beside the released `android` v0.2.0 plugin.
-The CI D11 job stages the released dependencies and generates with assembler
-v0.116.0. It checks that each shared JNI helper is defined once, comes from
-`deps/labelle-android`, and that no Android callback remains unresolved.
+The CI D11 job runs the released assembler v0.116.1 on a clean runner:
+`install` fetches the pinned packages, then `generate`. It checks that each
+shared JNI helper is defined once, comes from `deps/labelle-android`, and
+that no Android callback remains unresolved.
 The fixture deliberately disables gamepad polling to cover the native-loader
 failure caused by omitting the JNI event receivers in that configuration.
 
 For runtime acceptance, use Zig 0.16.0, the provider CLI built from
-`development` with `-Dversion=2.0.0`, and an authorized arm64 device/emulator:
+`development` (9e4625623fa2, cli#444, or later) with `-Dversion=2.0.0`, and
+an authorized arm64 device/emulator:
 
 ```sh
 labelle providers resolve
@@ -17,14 +19,15 @@ labelle providers resolve --accept
 labelle run --platform=android --optimize=ReleaseFast
 ```
 
-The released assembler's installer currently interprets `owner/repo` as a
-hostname. Until the CLI/assembler repository-form fix lands, stage Android's
-v0.2.0 source in `~/.labelle/packages/plugins/labelle-toolkit/labelle-android/0.2.0`
-(as CI does). This workaround does not alter the verified provider lock.
+The plugin pin uses the `github.com/labelle-toolkit/labelle-android` form:
+the assembler needs a hostname to download it, and the provider CLI (cli#444)
+matches it against the lock's `labelle-toolkit/labelle-android` entry. On a
+clean machine, `labelle providers fetch` (or `labelle install`) downloads the
+archive the lock pins before `generate`/`run`.
 
 `audio_probe.zig` opens the actual shared AAudio sink with silent PCM. Its
 `ProviderProbe` logcat messages report nonzero shared callback frames, surface
-size, and the intent-derived environment. Since assembler v0.116.0's Sokol
+size, and the intent-derived environment. Since assembler v0.116's Sokol
 callback loop does not poll screenshot requests or route Zig stderr to logcat,
 the fixture also drives `engine.requestedScreenshot()` through the backend's
 real framebuffer capture. This is not an Android compositor screenshot.

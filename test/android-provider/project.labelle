@@ -6,8 +6,8 @@
     .gamepad = .none, .ecs = .mock, .y_axis = .up,
     .initial_prefab = "main", .states = .{"playing"},
     .layers = .{ .{ .name = "hud", .order = 0, .space = .screen } },
-    .plugins = .{ .{ .name = "android", .repo = "labelle-toolkit/labelle-android", .version = "0.2.0" } },
+    .plugins = .{ .{ .name = "android", .repo = "github.com/labelle-toolkit/labelle-android", .version = "0.2.0" } },
     .provider_config = .{ .{ .package = "android", .file = "providers/android.json" } },
     .core_version = "2.1.0", .engine_version = "3.4.1", .gfx_version = "2.2.0",
-    .assembler_version = "0.116.0",
+    .assembler_version = "0.116.1",
 }
