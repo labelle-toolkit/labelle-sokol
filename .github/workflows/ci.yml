@@ -373,6 +373,10 @@ jobs:
       - name: D11 — provider plugin + sokol link ONE labelle_android (cli#405)
         env:
           D11_ASSEMBLER_TAG: v0.116.1
+          # Pinned digest of that release's labelle-assembler-linux-x86_64, so
+          # a moved tag or replaced asset (with a matching SHA256SUMS) fails
+          # here. Update it together with D11_ASSEMBLER_TAG.
+          D11_ASSEMBLER_SHA256: 40ff817f4f9bc712993fe347bd40a0b23afba97d4c776d6b6b565d83f4652eb0
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           set -euo pipefail
@@ -380,8 +384,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/d11-assembler"
           cd "$RUNNER_TEMP/d11-assembler" || exit 1
           curl -fsSLO "$base/labelle-assembler-linux-x86_64"
-          curl -fsSLO "$base/SHA256SUMS"
-          grep ' labelle-assembler-linux-x86_64$' SHA256SUMS | sha256sum -c -
+          echo "$D11_ASSEMBLER_SHA256  labelle-assembler-linux-x86_64" | sha256sum -c -
           chmod +x labelle-assembler-linux-x86_64
           asm="$PWD/labelle-assembler-linux-x86_64"
 
