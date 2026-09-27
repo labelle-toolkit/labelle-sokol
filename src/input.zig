@@ -593,3 +593,11 @@ test "key_repeat does not re-trigger the isKeyPressed edge" {
     try std.testing.expect(isKeyDown(key));
     try std.testing.expect(!isKeyPressed(key));
 }
+
+// Standalone Android tests must instantiate core's JNI event receiver,
+// which the generated game normally reaches through the engine.
+test "Android JNI gamepad receiver links" {
+    if (agp.is_android) {
+        _ = @import("labelle-core").gamepad_source.platform;
+    }
+}

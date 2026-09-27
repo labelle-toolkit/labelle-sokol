@@ -82,6 +82,11 @@ fn getNativeActivity() callconv(.c) ?*anyopaque {
 /// Android JNI calls (immersive-mode activity lookup + gamepad enumeration)
 /// through these pointers. See the module header for the lifecycle contract.
 pub fn backendContext() core.AndroidBackendContext {
+    // JNI glue always references these receivers, even when the project
+    // disables engine gamepad polling. Keep them in the shared-library link.
+    comptime {
+        _ = core.gamepad_source.platform;
+    }
     return .{
         .get_native_activity = &getNativeActivity,
         .gamepad_init = &labelle_android_gamepad_init,

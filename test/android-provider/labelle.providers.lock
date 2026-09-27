@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "providers": [
+    {
+      "package": "android",
+      "repo": "labelle-toolkit/labelle-android",
+      "version": "0.2.0",
+      "commit": "8caa8aa16237d5d2f1cc3ee5cfa195ab5194768c",
+      "sha256": "bae68d39bedbef0ea6ed5607584e2398fab254bb5e0bf746a825781b52907b75"
+    }
+  ]
+}

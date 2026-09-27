@@ -276,12 +276,10 @@ pub fn libcTxt(
     crt_dir: []const u8,
 ) ![]u8 {
     return std.mem.concat(allocator, u8, &.{
-        "include_dir=",     include_dir,     "\n",
-        "sys_include_dir=", sys_include_dir, "\n",
-        "crt_dir=",         crt_dir,         "\n",
-        "msvc_lib_dir=\n",
-        "kernel32_lib_dir=\n",
-        "gcc_dir=\n",
+        "include_dir=",     include_dir,           "\n",
+        "sys_include_dir=", sys_include_dir,       "\n",
+        "crt_dir=",         crt_dir,               "\n",
+        "msvc_lib_dir=\n",  "kernel32_lib_dir=\n", "gcc_dir=\n",
     });
 }
 
@@ -494,6 +492,63 @@ pub fn emLinkStep(b: *std.Build, options: EmLinkOptions) *std.Build.Step.Install
     return install;
 }
 
+pub const android_plugin_alias = "android";
+
+/// A module is a `labelle_android` instance when its owning package exports it
+/// under that name (labelle-android's `build.zig`:
+/// `b.addModule("labelle_android", …)`). Identity, not a file-path match.
+fn isLabelleAndroidModule(m: *std.Build.Module) bool {
+    const exported = m.owner.modules.get("labelle_android") orelse return false;
+    return exported == m;
+}
+
+/// PURE graph rewrite behind `unifyLabelleAndroid`, generic over the module
+/// type so it is unit-testable without a `*std.Build` (`M` needs an
+/// `import_table: std.StringArrayHashMapUnmanaged(*M)`). The target is chosen
+/// explicitly: `root`'s import named `plugin_alias`, and only when that module
+/// is an instance. Every instance import reachable from `root` is then
+/// redirected to it. Returns the target, or null with the graph untouched when
+/// `root` has no such import (no provider plugin): an instance some other
+/// dependency happens to export never becomes the target. Only existing keys
+/// are rewritten: no import is added or removed.
+pub fn unifyOntoPluginInstance(
+    comptime M: type,
+    gpa: std.mem.Allocator,
+    root: *M,
+    plugin_alias: []const u8,
+    isInstance: *const fn (*M) bool,
+) ?*M {
+    const one = root.import_table.get(plugin_alias) orelse return null;
+    if (!isInstance(one)) return null;
+
+    var order: std.ArrayListUnmanaged(*M) = .empty;
+    defer order.deinit(gpa);
+    var seen: std.AutoHashMapUnmanaged(*M, void) = .empty;
+    defer seen.deinit(gpa);
+
+    seen.put(gpa, root, {}) catch @panic("OOM");
+    order.append(gpa, root) catch @panic("OOM");
+    var i: usize = 0;
+    while (i < order.items.len) : (i += 1) {
+        for (order.items[i].import_table.values()) |dep| {
+            const gop = seen.getOrPut(gpa, dep) catch @panic("OOM");
+            if (!gop.found_existing) order.append(gpa, dep) catch @panic("OOM");
+        }
+    }
+    for (order.items) |m| {
+        for (m.import_table.values()) |*dep| {
+            if (dep.* != one and isInstance(dep.*)) dep.* = one;
+        }
+    }
+    return one;
+}
+
+/// The android arm of `post_wire`: see the section comment above. Without the
+/// `android` plugin on the `.so` root nothing changes.
+pub fn unifyLabelleAndroid(b: *std.Build, ctx: HookContext) void {
+    _ = unifyOntoPluginInstance(std.Build.Module, b.allocator, ctx.root_module, android_plugin_alias, &isLabelleAndroidModule);
+}
+
 /// Runs AFTER the generic module/artifact/system-lib/framework wiring, to
 /// supplement the graph with the residual the manifest cannot express statically
 /// (design §2). DESKTOP is empty (no residual). ANDROID does the NDK sysroot
@@ -505,6 +560,7 @@ pub fn post_wire(b: *std.Build, ctx: HookContext) void {
     switch (ctx.platform) {
         .desktop => {}, // fully declarative — no residual
         .android => {
+            unifyLabelleAndroid(b, ctx);
             const sysroot = getAndroidNdkSysroot(b) orelse
                 @panic("Could not find Android NDK. Set ANDROID_NDK_HOME or ANDROID_HOME.");
             // REQUIRED — no `orelse 34` fallback (design §4 review-correction #6).
@@ -818,4 +874,127 @@ test "selectGreatestValidNdk: a stray dir doesn't shadow a valid older NDK" {
 
     // Empty set → null.
     try testing.expectEqual(@as(?[]const u8, null), selectGreatestValidNdk(&.{}));
+}
+
+// ── unifyOntoPluginInstance (labelle-cli#405 D11) ──────────────────────────
+
+const FakeMod = struct {
+    import_table: std.StringArrayHashMapUnmanaged(*FakeMod) = .empty,
+    is_instance: bool = false,
+
+    fn isInstance(m: *FakeMod) bool {
+        return m.is_instance;
+    }
+
+    fn import(m: *FakeMod, name: []const u8, dep: *FakeMod) !void {
+        try m.import_table.put(testing.allocator, name, dep);
+    }
+
+    fn deinit(m: *FakeMod) void {
+        m.import_table.deinit(testing.allocator);
+    }
+};
+
+fn unifyFake(root: *FakeMod) ?*FakeMod {
+    return unifyOntoPluginInstance(FakeMod, testing.allocator, root, android_plugin_alias, &FakeMod.isInstance);
+}
+
+test "unifyOntoPluginInstance: the root's `android` plugin replaces the backend's copy everywhere" {
+    // The generated android `.so`: root imports the plugin under its plugin
+    // name and the backend modules; bgfx's gfx/audio/android_app import bgfx's
+    // own `labelle_android`, one of them through a nested module.
+    var own: FakeMod = .{ .is_instance = true };
+    var plugin: FakeMod = .{ .is_instance = true };
+    var gfx: FakeMod = .{};
+    var audio: FakeMod = .{};
+    var app: FakeMod = .{};
+    var nested: FakeMod = .{};
+    var root: FakeMod = .{};
+    defer for ([_]*FakeMod{ &own, &plugin, &gfx, &audio, &app, &nested, &root }) |m| m.deinit();
+
+    try root.import("backend_gfx", &gfx);
+    try root.import("backend_audio", &audio);
+    try root.import("backend_app", &app);
+    try root.import("android", &plugin);
+    try gfx.import("labelle_android", &own);
+    try audio.import("labelle_android", &own);
+    try app.import("shell", &nested);
+    try nested.import("labelle_android", &own);
+
+    try testing.expectEqualStrings("android", android_plugin_alias);
+    try testing.expectEqual(@as(?*FakeMod, &plugin), unifyFake(&root));
+    try testing.expectEqual(&plugin, gfx.import_table.get("labelle_android").?);
+    try testing.expectEqual(&plugin, audio.import_table.get("labelle_android").?);
+    try testing.expectEqual(&plugin, nested.import_table.get("labelle_android").?);
+    try testing.expectEqual(&plugin, root.import_table.get("android").?);
+    // Rewrites only: no import added or dropped.
+    try testing.expectEqual(@as(usize, 4), root.import_table.count());
+    try testing.expectEqual(@as(usize, 1), gfx.import_table.count());
+}
+
+test "unifyOntoPluginInstance: no plugin on root → graph untouched" {
+    var own: FakeMod = .{ .is_instance = true };
+    var gfx: FakeMod = .{};
+    var root: FakeMod = .{};
+    defer for ([_]*FakeMod{ &own, &gfx, &root }) |m| m.deinit();
+
+    try root.import("backend_gfx", &gfx);
+    try gfx.import("labelle_android", &own);
+
+    try testing.expectEqual(@as(?*FakeMod, null), unifyFake(&root));
+    try testing.expectEqual(&own, gfx.import_table.get("labelle_android").?);
+}
+
+test "unifyOntoPluginInstance: an unrelated labelle_android elsewhere, no plugin import on root → no-op" {
+    // Another dependency exports its own labelle_android copy, reachable from
+    // the root, but the root does not import the `android` plugin. Neither
+    // copy may become the target.
+    var own: FakeMod = .{ .is_instance = true };
+    var other: FakeMod = .{ .is_instance = true };
+    var gfx: FakeMod = .{};
+    var some_plugin: FakeMod = .{};
+    var root: FakeMod = .{};
+    defer for ([_]*FakeMod{ &own, &other, &gfx, &some_plugin, &root }) |m| m.deinit();
+
+    try root.import("backend_gfx", &gfx);
+    try root.import("some_plugin", &some_plugin);
+    try gfx.import("labelle_android", &own);
+    try some_plugin.import("labelle_android", &other);
+
+    try testing.expectEqual(@as(?*FakeMod, null), unifyFake(&root));
+    try testing.expectEqual(&own, gfx.import_table.get("labelle_android").?);
+    try testing.expectEqual(&other, some_plugin.import_table.get("labelle_android").?);
+}
+
+test "unifyOntoPluginInstance: a root `android` import that is not an instance → no-op" {
+    var own: FakeMod = .{ .is_instance = true };
+    var not_la: FakeMod = .{};
+    var gfx: FakeMod = .{};
+    var root: FakeMod = .{};
+    defer for ([_]*FakeMod{ &own, &not_la, &gfx, &root }) |m| m.deinit();
+
+    try root.import("backend_gfx", &gfx);
+    try root.import("android", &not_la);
+    try gfx.import("labelle_android", &own);
+
+    try testing.expectEqual(@as(?*FakeMod, null), unifyFake(&root));
+    try testing.expectEqual(&own, gfx.import_table.get("labelle_android").?);
+}
+
+test "unifyOntoPluginInstance: a cyclic graph terminates" {
+    var own: FakeMod = .{ .is_instance = true };
+    var plugin: FakeMod = .{ .is_instance = true };
+    var a: FakeMod = .{};
+    var b: FakeMod = .{};
+    var root: FakeMod = .{};
+    defer for ([_]*FakeMod{ &own, &plugin, &a, &b, &root }) |m| m.deinit();
+
+    try root.import("a", &a);
+    try root.import("android", &plugin);
+    try a.import("b", &b);
+    try b.import("a", &a);
+    try b.import("labelle_android", &own);
+
+    try testing.expectEqual(@as(?*FakeMod, &plugin), unifyFake(&root));
+    try testing.expectEqual(&plugin, b.import_table.get("labelle_android").?);
 }

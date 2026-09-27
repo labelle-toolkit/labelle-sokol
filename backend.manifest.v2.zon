@@ -105,7 +105,7 @@
             // `labelle.*` id (assembler-side `assertLifecyclePrivilege`).
             .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .native,
-            .artifacts = .{ .{ .name = "sokol_clib" } },
+            .artifacts = .{.{ .name = "sokol_clib" }},
             // gamepad_* is desktop-only — APPENDED to the base `with_imgui`, so
             // desktop's literal forwards all three flags (the v1 fragment's
             // with_imgui/gamepad_enabled/gamepad_hidapi param set).
@@ -121,8 +121,8 @@
             .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .resolved,
             .link_libc = true,
-            .artifacts = .{ .{ .name = "sokol_clib" } },
-            .dep_options = .{ .{ .name = "dont_link_system_libs", .value = .true_literal } },
+            .artifacts = .{.{ .name = "sokol_clib" }},
+            .dep_options = .{.{ .name = "dont_link_system_libs", .value = .true_literal }},
             .package = .binary,
         },
         .android = .{
@@ -132,8 +132,10 @@
             .target = .resolved,
             .pic = true,
             .link_libc = true,
-            .artifacts = .{ .{ .name = "sokol_clib", .pic = true } },
-            .dep_options = .{ .{ .name = "dont_link_system_libs", .value = .true_literal } },
+            .artifacts = .{.{ .name = "sokol_clib", .pic = true }},
+            .dep_options = .{.{ .name = "dont_link_system_libs", .value = .true_literal }},
+            // Retained for released assemblers <= 0.115.0; newer builds
+            // delegate packaging to the android provider after-build hook.
             .package = .{ .apk = .{ .manifest = "AndroidManifest.xml.tmpl" } },
         },
         .wasm = .{
@@ -145,9 +147,9 @@
             .loop_style = .callback,
             .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
             .target = .{ .triple = "wasm32-emscripten" },
-            .artifacts = .{ .{ .name = "sokol_clib" } },
+            .artifacts = .{.{ .name = "sokol_clib" }},
             .dep_options = .{},
-            .root_build_deps = .{ .{ .name = "emsdk", .resolution = .builtin } },
+            .root_build_deps = .{.{ .name = "emsdk", .resolution = .builtin }},
             .package = .{ .web = .{ .shell = null } },
         },
     },

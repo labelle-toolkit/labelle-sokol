@@ -122,7 +122,9 @@ fn addBackendGraph(
             .target = target,
             .optimize = optimize,
             .with_sokol_imgui = opts.with_imgui,
-            .dont_link_system_libs = opts.dont_link_system_libs,
+            // Android shared libraries belong on the final link, never inside
+            // the sokol static archive (NDK .so members are not relocatable).
+            .dont_link_system_libs = true,
         })
     else
         b.dependency("sokol", .{
@@ -328,6 +330,10 @@ fn addBackendGraph(
         .link_libc = true,
     });
     audio_mod.addImport("sokol", sokol_mod);
+    if (is_android) {
+        const android_dep = b.dependency("labelle_android", .{ .target = target, .optimize = optimize });
+        audio_mod.addImport("labelle_android", android_dep.module("labelle_android"));
+    }
     audio_mod.addIncludePath(b.path("src"));
 
     // Shared audio engine (Phase 2 of the pluggable-backends RFC). The WAV
@@ -377,6 +383,12 @@ fn addBackendGraph(
     // (labelle-gfx#305), so it imports the SAME gfx module instance the game
     // imports — module-level material-queue state is shared.
     window_mod.addImport("gfx", gfx_mod);
+    if (is_android) {
+        // Standalone cross-checks need the same shared NDK paths as game builds.
+        for ([_]*std.Build.Module{ sokol_clib.root_module, sokol_mod, gfx_mod, gfx_core_mod, input_mod, audio_mod, window_mod }) |mod| {
+            _ = @import("labelle_android").addAndroidSysroot(b, mod, target);
+        }
+    }
 
     return .{
         .sokol_mod = sokol_mod,
@@ -470,6 +482,16 @@ pub fn build(b: *std.Build) void {
     // forwarding + the kept OGG/WAV decoder are exercised by `audio_compile_check`
     // / `test-host` below.
     const host_target = b.resolveTargetQuery(.{});
+    // Build-hook graph rewriting is pure and runs on the host even when the
+    // backend compile checks target Android.
+    const hook_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("backend.hook.zig"),
+            .target = host_target,
+            .optimize = optimize,
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(hook_tests).step);
 
     // Run the ASTC container-parsing tests (#341). `gfx/astc.zig` is pure byte
     // parsing with no sokol dependency, so it EXECUTES on the host (magic
@@ -518,6 +540,13 @@ pub fn build(b: *std.Build) void {
         input_compile_check,
     };
     for (test_runs) |check| {
+        if (target.result.abi == .android or target.result.abi == .androideabi) {
+            const n = @import("labelle_android").resolveNdk(b, target, .{});
+            const body = @import("backend.hook.zig").libcTxt(b.allocator, n.inc_common, n.inc_arch, n.lib_path) catch @panic("OOM");
+            check.setLibCFile(b.addWriteFiles().add("android-libc.txt", body));
+            for ([_][]const u8{ "GLESv3", "EGL", "android", "log" }) |lib| check.root_module.linkSystemLibrary(lib, .{});
+        }
+
         const run = b.addRunArtifact(check);
         run.skip_foreign_checks = true;
         test_step.dependOn(&run.step);

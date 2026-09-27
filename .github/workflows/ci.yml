@@ -272,11 +272,14 @@ jobs:
           path: labelle-assembler
           persist-credentials: false
 
-      - name: Checkout labelle-cli (main)
+      # Pinned to an immutable commit, not the moving `development` branch:
+      # the #444 merge (github.com/ repo matching + `labelle providers fetch`).
+      # Move this to the labelle-cli v2.0.0 tag once it is released.
+      - name: Checkout provider CLI (development @ cli#444)
         uses: actions/checkout@v4
         with:
           repository: labelle-toolkit/labelle-cli
-          ref: main
+          ref: 9e4625623fa2789fae3e774d6ed42600c10fdd96
           path: labelle-cli
           persist-credentials: false
 
@@ -313,16 +316,28 @@ jobs:
         run: cd labelle-assembler && zig build
 
       - name: Build labelle-cli
-        run: cd labelle-cli && zig build
+        run: |
+          cd labelle-cli || exit 1
+          zig build -Dversion=2.0.0
+
+      # A fresh runner has no provider archives cached, and `generate` does not
+      # download them (it fails with ProviderArchiveMissing). `providers fetch`
+      # downloads exactly what labelle.providers.lock pins and checks each
+      # sha256. The assembler fetches the plugin package itself during
+      # generate (the `github.com/` repo form in project.labelle).
+      - name: Fetch pinned provider archives
+        run: |
+          cd labelle-sokol/examples/gamepad-android || exit 1
+          "$GITHUB_WORKSPACE/labelle-cli/zig-out/bin/labelle" providers fetch
 
       - name: Generate + cross-build libgame.so (aarch64-linux-android)
         env:
           LABELLE_ASSEMBLER: ${{ github.workspace }}/labelle-assembler/zig-out/bin/labelle-assembler
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
         run: |
-          cd labelle-sokol/examples/gamepad-android
+          cd labelle-sokol/examples/gamepad-android || exit 1
           "$GITHUB_WORKSPACE/labelle-cli/zig-out/bin/labelle" generate --platform=android
-          cd .labelle/sokol_android
+          cd .labelle/sokol_android || exit 1
           zig build
 
       - name: Verify libgame.so
@@ -338,3 +353,81 @@ jobs:
           nm -D "$so" | grep -q 'ANativeActivity_onCreate' \
             && echo "ANativeActivity_onCreate exported" \
             || echo "WARN: ANativeActivity_onCreate not found in dynamic symbols"
+
+  android-provider:
+    name: Android provider D11
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: labelle-sokol
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+      - name: D11 — provider plugin + sokol link ONE labelle_android (cli#405)
+        env:
+          D11_ASSEMBLER_TAG: v0.116.1
+          # Pinned digest of that release's labelle-assembler-linux-x86_64, so
+          # a moved tag or replaced asset (with a matching SHA256SUMS) fails
+          # here. Update it together with D11_ASSEMBLER_TAG.
+          D11_ASSEMBLER_SHA256: 40ff817f4f9bc712993fe347bd40a0b23afba97d4c776d6b6b565d83f4652eb0
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          set -euo pipefail
+          base="https://github.com/labelle-toolkit/labelle-assembler/releases/download/$D11_ASSEMBLER_TAG"
+          mkdir -p "$RUNNER_TEMP/d11-assembler"
+          cd "$RUNNER_TEMP/d11-assembler" || exit 1
+          curl -fsSLO "$base/labelle-assembler-linux-x86_64"
+          echo "$D11_ASSEMBLER_SHA256  labelle-assembler-linux-x86_64" | sha256sum -c -
+          chmod +x labelle-assembler-linux-x86_64
+          asm="$PWD/labelle-assembler-linux-x86_64"
+
+          cd "$GITHUB_WORKSPACE/labelle-sokol/test/android-provider" || exit 1
+          # The bare assembler's `generate` only links packages already in
+          # ~/.labelle/packages; `install` fetches every package the fixture
+          # pins (core/gfx/engine and the github.com/ android plugin) first.
+          # Clean-home install works from assembler v0.116.1.
+          "$asm" install --project-root .
+          # Capture, then check: a missing package is only a WARNING to
+          # `generate` ("could not link dep"), and must fail this step.
+          "$asm" generate --project-root . --platform android 2>&1 | tee "$RUNNER_TEMP/d11-generate.log"
+          if grep -q 'could not link dep' "$RUNNER_TEMP/d11-generate.log"; then
+            echo "FAIL: generate could not link a package that install should have fetched"; exit 1
+          fi
+          # The link IS the check: duplicate JNI C fails it.
+          (cd .labelle/sokol_android || exit 1; zig build)
+
+          so=$(find .labelle/sokol_android/zig-out -name 'libgame.so' | head -1)
+          if [ -z "$so" ]; then echo "FAIL: libgame.so not found"; exit 1; fi
+          fail=0
+          defined=$(nm -D --defined-only "$so" | awk '$3 ~ /^labelle_android_/ { print $3 }' | sort)
+          for sym in labelle_android_acquire_env labelle_android_read_intent_extras \
+                     labelle_android_app_is_debuggable labelle_android_force_window_relayout; do
+            n=$(printf '%s\n' "$defined" | grep -cx "$sym" || true)
+            if [ "$n" -ne 1 ]; then echo "FAIL: $sym defined $n times (want 1)"; fail=1; else echo "ok    $sym x1"; fi
+          done
+          nm -D --undefined-only "$so" > "$RUNNER_TEMP/d11-undefined.txt"
+          if grep -q 'labelle_android_' "$RUNNER_TEMP/d11-undefined.txt"; then
+            echo "FAIL: unresolved Android runtime/gamepad callback"; fail=1
+          fi
+          dups=$(printf '%s\n' "$defined" | uniq -d)
+          if [ -n "$dups" ]; then echo "FAIL: duplicated: $dups"; fail=1; fi
+          # The mechanism, not just the count: the JNI C in the .so is the
+          # PLUGIN's copy (.labelle/deps/labelle-android), and sokol's
+          # hash-fetched copy (zig-pkg/labelle_android-<ver>-<hash>) is absent.
+          # Into a file first: `strings | grep -q` under pipefail fails on the
+          # SIGPIPE when grep stops reading early.
+          strings -a "$so" > "$RUNNER_TEMP/d11-strings.txt"
+          if ! grep -q 'deps/labelle-android/src/jni/intent_extras\.c' "$RUNNER_TEMP/d11-strings.txt"; then
+            echo "FAIL: the JNI C is not the provider plugin's copy"; fail=1
+          fi
+          if grep -q 'labelle_android-[0-9][0-9.]*-[A-Za-z0-9_-]*/src/jni' "$RUNNER_TEMP/d11-strings.txt"; then
+            echo "FAIL: sokol's own labelle_android copy reached the .so"; fail=1
+          fi
+          exit "$fail"
