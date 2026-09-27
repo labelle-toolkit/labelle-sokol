@@ -313,16 +313,11 @@ fn addBackendGraph(
             .file = android_gp_dep.path("src/android_gamepad_jni.c"),
             .flags = &.{},
         });
-        // Launch-intent `LABELLE_*` extras → env vars (labelle-sokol#25): the
-        // JNI half (intent extras + the debuggable gate) behind
-        // `launch_intent_env.apply()`, which the generated `sokol_main()` calls
-        // before the engine's first `getenv`. Same JNI-in-C rationale and
-        // `__ANDROID__` gate as `android_gamepad_jni.c`; relies on the same NDK
-        // sysroot/libc wiring.
-        input_mod.addCSourceFile(.{
-            .file = b.path("src/android_intent_extras.c"),
-            .flags = &.{},
-        });
+        // The shared package compiles its own JNI C against its NDK sysroot.
+        // Keep the gamepad bridge above independent; only the duplicated
+        // launch-intent/debuggable services move here (#27).
+        const android_dep = b.dependency("labelle_android", .{ .target = target, .optimize = optimize });
+        input_mod.addImport("labelle_android", android_dep.module("labelle_android"));
     }
 
     // ── Audio backend module ────────────────────────────────────────
