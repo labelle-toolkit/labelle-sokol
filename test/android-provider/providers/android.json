@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "package_name": "com.labelle.sokol_provider",
+  "app_name": "Sokol Provider",
+  "min_sdk_version": 28,
+  "target_sdk_version": 34,
+  "orientation": "landscape",
+  "debuggable": true
+}

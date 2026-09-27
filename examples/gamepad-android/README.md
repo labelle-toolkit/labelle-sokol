@@ -37,36 +37,25 @@ engine hotplug events. None of that is backend-specific.
   labelle-core's `gamepad_source/android.zig` (#248 JNI detection), instead of
   raylib's desktop polling.
 
-## Build the APK
+## Build and run through the Android provider
+
+Use labelle-cli >= 2.0.0 with Zig 0.16.0. This example pins the `android`
+plugin at v0.2.0; packaging settings live in `providers/android.json`.
 
 ```sh
-labelle android doctor          # confirm SDK/NDK toolchain
-labelle android build --all-abis  # arm64-v8a + x86_64 fat APK, debug-signed
-# → APK at .labelle/sokol_android/game.apk
+labelle android doctor
+labelle providers resolve
+# Review the Android 0.2.0 pin printed above.
+labelle providers resolve --accept
+labelle run --platform=android --optimize=ReleaseFast
+# APK: .labelle/sokol_android/zig-out/apk/game.apk
 ```
 
-Drop `--all-abis` for an arm64-v8a-only APK. The debug keystore is auto-created
-so the APK installs without a release keystore.
-
-## Install
-
-**Phone (USB):**
-
-```sh
-adb install -r .labelle/sokol_android/game.apk
-```
-
-**Android TV (network adb):**
-
-```sh
-adb connect <tv-ip>:5555
-adb install -r .labelle/sokol_android/game.apk
-```
-
-(Enable Developer Options + USB/Network debugging on the device first. On
-Android TV, "Network debugging" lives under Settings → Device Preferences →
-Developer options.) You can also sideload the APK via a file manager / Send
-Files to TV if adb isn't available.
+Select a device with `ANDROID_SERIAL=<adb-serial>`. The provider builds an
+arm64-v8a APK, signs it with the existing Labelle debug keystore, installs
+with `adb install -r`, and launches it. `labelle build --platform=android`
+packages without deploying; `labelle bundle --platform=android` exports it.
+Do not uninstall or clear application data to resolve a signature mismatch.
 
 ## Pair a controller
 

@@ -6,6 +6,9 @@
 /// `audio_slots.zig`) now live in the shared `labelle-audio` package. This file
 /// is a thin adapter over `labelle_audio.Mixer(SokolSink)`.
 ///
+/// Android uses labelle_android.aaudio and its i16 device callback. Other
+/// platforms retain sokol_audio and the f32 path described below.
+///
 /// ## The f32 case (the new part of the pilot)
 ///
 /// Unlike bgfx/wgpu (i16 device callbacks), sokol drives audio through
@@ -44,7 +47,10 @@ pub const targets_audio_loader_contract: u32 = 1;
 
 const std = @import("std");
 const labelle_audio = @import("labelle-audio");
-const SokolSink = @import("audio/sink.zig");
+const builtin = @import("builtin");
+const is_android = builtin.abi == .android or builtin.abi == .androideabi;
+// Desktop/web keep sokol's f32 sink; Android uses the shared i16 AAudio device.
+const SokolSink = if (is_android) @import("audio/android_sink.zig") else @import("audio/sink.zig");
 const decode = @import("audio/decode.zig");
 
 /// The shared PCM mixer, parameterized by sokol's sokol_audio device as the

@@ -69,6 +69,12 @@ pub fn readback(out: []u8, w: u32, h: u32) bool {
         return false;
     }
 
+    // Only attribute errors from this readback to capture. Android emulator
+    // drivers may leave an earlier unsupported renderer query in GL's error
+    // queue; checking it after a successful read would discard valid pixels.
+    var pending: usize = 0;
+    while (gl.glGetError() != 0 and pending < 32) : (pending += 1) {}
+
     // Tight packing — otherwise drivers may pad rows to 4-byte alignment
     // for non-multiple-of-4 widths and corrupt the layout we hand to BMP.
     gl.glPixelStorei(GL_PACK_ALIGNMENT, 1);

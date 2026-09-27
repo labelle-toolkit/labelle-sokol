@@ -4,10 +4,10 @@
     .version = "0.7.0",
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
-        // Shared launch-intent services own their JNI and NDK wiring (#27).
+        // Shared Android runtime services own their JNI and NDK wiring (#27).
         .labelle_android = .{
-            .url = "https://github.com/labelle-toolkit/labelle-android/archive/refs/tags/v0.1.0.tar.gz",
-            .hash = "labelle_android-0.1.0-sErgQs3nAwCwI6QRpkuN_OWgtPWxkoMJbvTzhGoaXZUr",
+            .url = "https://github.com/labelle-toolkit/labelle-android/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "labelle_android-0.2.0-sErgQhOvDgDBEqwMU4h1VZY1tTVpsUnnw1qXaabKT438",
         },
         // Shared windowless-SDL desktop gamepad source (core#28). In-tree
         // sub-package shared with the raylib backend via a relative path — the
