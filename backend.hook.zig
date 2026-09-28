@@ -409,15 +409,37 @@ const EmToolResolution = union(enum) {
 };
 
 /// Pure decision behind `emTool`. An external EMSDK is an override only when
-/// its managed tool exists, so stale or incomplete environments do not shadow
-/// the package dependency. The filesystem is injected to keep this testable
-/// without downloading an SDK.
+/// it is complete, so stale or incomplete environments do not shadow the
+/// package dependency. Complete means the SAME test build.zig's
+/// `emsdk_source.resolve` applies to pick the sysroot the C code compiles
+/// against (labelle-sokol#33): the tool, `.emscripten` (activated) and
+/// `upstream/emscripten/cache/sysroot/include`. So the compile and this link
+/// always agree on one emsdk. (The hook is std-only and can't import
+/// emsdk_source.zig; the rule is repeated here and tested below.) The
+/// filesystem is injected to keep this testable without downloading an SDK.
 fn emToolPath(gpa: std.mem.Allocator, env_emsdk: ?[]const u8, tool: []const u8, fs: anytype) EmToolResolution {
     const root = env_emsdk orelse return .dep;
     if (root.len == 0) return .dep;
 
     const abs = std.fs.path.join(gpa, &.{ root, "upstream", "emscripten", tool }) catch return .dep;
-    if (fs.exists(abs)) return .{ .managed = abs };
+    const required = [_][]const []const u8{
+        &.{".emscripten"},
+        &.{ "upstream", "emscripten", "cache", "sysroot", "include" },
+    };
+    var complete = fs.exists(abs);
+    for (required) |rel| {
+        if (!complete) break;
+        var parts: [8][]const u8 = undefined;
+        parts[0] = root;
+        for (rel, 1..) |p, i| parts[i] = p;
+        const path = std.fs.path.join(gpa, parts[0 .. rel.len + 1]) catch {
+            complete = false;
+            break;
+        };
+        defer gpa.free(path);
+        complete = fs.exists(path);
+    }
+    if (complete) return .{ .managed = abs };
     gpa.free(abs);
     return .dep;
 }
@@ -769,7 +791,9 @@ test "emToolPath: unset and empty EMSDK use the dependency fallback" {
 test "emToolPath: existing managed EMSDK tool takes precedence" {
     const Fs = struct {
         fn exists(_: @This(), path: []const u8) bool {
-            return std.mem.endsWith(u8, path, "upstream/emscripten/emcc");
+            return std.mem.endsWith(u8, path, "upstream/emscripten/emcc") or
+                std.mem.endsWith(u8, path, ".emscripten") or
+                std.mem.endsWith(u8, path, "cache/sysroot/include");
         }
     };
     const root = "/home/u/.labelle/emsdk/4.0.0";
@@ -804,10 +828,43 @@ test "emToolPath: missing managed tool falls back to dependency" {
     }
 }
 
+test "emToolPath: an EMSDK build.zig would reject is rejected here too (#33)" {
+    // build.zig compiles against the package emsdk unless EMSDK has the tool,
+    // `.emscripten` AND the sysroot. The link must fall back in the same cases,
+    // or the C code and the link would use two different SDKs.
+    const root = "/opt/emsdk";
+    const cases = [_][]const []const u8{
+        // emcc only (installed, not activated)
+        &.{"upstream/emscripten/emcc"},
+        // emcc + .emscripten, but no sysroot
+        &.{ "upstream/emscripten/emcc", ".emscripten" },
+        // .emscripten + sysroot, but no emcc
+        &.{ ".emscripten", "cache/sysroot/include" },
+    };
+    for (cases) |present| {
+        const Fs = struct {
+            present: []const []const u8,
+            fn exists(self: @This(), path: []const u8) bool {
+                for (self.present) |suffix| if (std.mem.endsWith(u8, path, suffix)) return true;
+                return false;
+            }
+        };
+        switch (emToolPath(testing.allocator, root, "emcc", Fs{ .present = present })) {
+            .dep => {},
+            .managed => |path| {
+                testing.allocator.free(path);
+                return error.TestUnexpectedManaged;
+            },
+        }
+    }
+}
+
 test "emToolPath: Windows wrapper name is preserved" {
     const Fs = struct {
         fn exists(_: @This(), path: []const u8) bool {
-            return std.mem.endsWith(u8, path, "emcc.bat");
+            return std.mem.endsWith(u8, path, "emcc.bat") or
+                std.mem.endsWith(u8, path, ".emscripten") or
+                std.mem.endsWith(u8, path, "include");
         }
     };
 

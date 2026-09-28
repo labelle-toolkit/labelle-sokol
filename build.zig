@@ -81,7 +81,7 @@ fn emscriptenSysroot(
     }, BuildFs{ .b = b });
     if (emsdk_source.mismatch(source, expect)) |msg| std.debug.panic("emsdk: {s}", .{msg});
     var sysroot: std.Build.LazyPath = undefined;
-    var setup: ?*std.Build.Step = null;
+    var package_emsdk: ?*std.Build.Dependency = null;
     switch (source) {
         .external => |root| sysroot = .{
             .cwd_relative = emsdk_source.sysrootInclude(b.allocator, root) catch @panic("OOM"),
@@ -89,10 +89,13 @@ fn emscriptenSysroot(
         .package => {
             const emsdk_dep = b.lazyDependency("emsdk", .{}) orelse return null;
             sysroot = emsdk_dep.path("upstream/emscripten/cache/sysroot/include");
-            setup = sokol_emsdk_setup.packageSetupStep(b, emsdk_dep);
+            package_emsdk = emsdk_dep;
         },
     }
-    _ = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, setup);
+    // takeOver creates the package's setup on sokol_clib, or reuses the one the
+    // imgui bridge already attached to this shared artifact (never two
+    // installs on one emsdk directory).
+    _ = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, package_emsdk);
     return sysroot;
 }
 
