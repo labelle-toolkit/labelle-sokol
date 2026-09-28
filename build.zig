@@ -1,5 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
+// Which emsdk a wasm build uses: a valid EMSDK, or this package's emsdk (#33).
+const emsdk_source = @import("emsdk_source.zig");
+// Takes sokol-zig's own emsdk setup + sysroot off sokol_clib (#33). Identical
+// to labelle-imgui's bridges/sokol copy: both build the same sokol_clib.
+const sokol_emsdk_setup = @import("sokol_emsdk_setup.zig");
 
 /// True when `t` is a native desktop OS (matches the shared SDL source's
 /// comptime `is_desktop`): only there are the SDL `extern`s referenced and SDL
@@ -49,6 +54,48 @@ fn dirExists(path: []const u8) bool {
 pub const EmLinkOptions = @import("sokol").EmLinkOptions;
 pub const emLinkStep = @import("sokol").emLinkStep;
 
+/// Choose the emsdk for a wasm build (#33), take sokol-zig's emsdk handling
+/// off `sokol_clib` in its favour, and return its sysroot include dir. Null
+/// only while the lazy package emsdk hasn't been fetched yet (the build runner
+/// fetches it and re-runs `build()`).
+fn emscriptenSysroot(
+    b: *std.Build,
+    sokol_dep: *std.Build.Dependency,
+    sokol_clib: *std.Build.Step.Compile,
+    expect: ?emsdk_source.Expect,
+) ?std.Build.LazyPath {
+    const BuildFs = struct {
+        b: *std.Build,
+        pub fn exists(self: @This(), path: []const u8) bool {
+            std.Io.Dir.cwd().access(self.b.graph.io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                // Anything else (permissions, I/O) is not "missing": report it
+                // rather than silently falling back to installing the package.
+                else => std.debug.panic("emsdk: cannot check path '{s}': {s}", .{ path, @errorName(err) }),
+            };
+            return true;
+        }
+    };
+    const source = emsdk_source.resolve(b.allocator, b.graph.environ_map.get("EMSDK"), .{
+        .emcc_name = if (builtin.os.tag == .windows) "emcc.bat" else "emcc",
+    }, BuildFs{ .b = b });
+    if (emsdk_source.mismatch(source, expect)) |msg| std.debug.panic("emsdk: {s}", .{msg});
+    var sysroot: std.Build.LazyPath = undefined;
+    var setup: ?*std.Build.Step = null;
+    switch (source) {
+        .external => |root| sysroot = .{
+            .cwd_relative = emsdk_source.sysrootInclude(b.allocator, root) catch @panic("OOM"),
+        },
+        .package => {
+            const emsdk_dep = b.lazyDependency("emsdk", .{}) orelse return null;
+            sysroot = emsdk_dep.path("upstream/emscripten/cache/sysroot/include");
+            setup = sokol_emsdk_setup.packageSetupStep(b, emsdk_dep);
+        },
+    }
+    _ = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, setup);
+    return sysroot;
+}
+
 /// Knobs the backend module graph is parameterised by. `register` is the only
 /// one that is not a user option: the PRIMARY graph publishes its modules under
 /// their public names (consumers do `dep.module("gfx")`), while the extra
@@ -60,6 +107,8 @@ const BackendOptions = struct {
     gamepad_enabled: bool,
     gamepad_hidapi: bool,
     register: bool,
+    /// `-Demsdk_expect` (wasm only): fail unless this emsdk source was chosen.
+    emsdk_expect: ?emsdk_source.Expect = null,
 };
 
 /// Everything `build()` needs back out of `addBackendGraph`.
@@ -216,9 +265,22 @@ fn addBackendGraph(
     // setting it after the addCSourceFile calls caused emcc to bail
     // with `'stdio.h' file not found`. Mirrors sokol-zig's pattern
     // in `mod_sokol_clib`'s setup.
+    //
+    // ONE emsdk provides the headers for sokol_clib and gfx, and it is the
+    // one the game links with (labelle-sokol#33, see emsdk_source.zig):
+    //   - a valid `EMSDK` (labelle-web 0.3 exports EMSDK, EM_CONFIG and PATH
+    //     in that shape; backend.hook.zig's emcc prefers it too), whose
+    //     sysroot is used as is, and this package's emsdk is not fetched; or
+    //   - this package's `emsdk` (pinned like the game's root emsdk), with its
+    //     own install/activate when it isn't activated yet.
+    // Either way sokol-zig's OWN emsdk handling is taken off sokol_clib
+    // (`sokol_emsdk_setup.takeOver`): its install/activate on sokol-zig's
+    // different emsdk pin (5.0.x), a second ~1.5 GB download per cold runner,
+    // and its sysroot include. `-Demsdk_expect=external|package` fails the
+    // configure unless that source was chosen, so CI can assert which ran.
     if (target.result.os.tag == .emscripten) {
-        if (b.lazyDependency("emsdk", .{})) |emsdk_dep| {
-            gfx_mod.addSystemIncludePath(emsdk_dep.path("upstream/emscripten/cache/sysroot/include"));
+        if (emscriptenSysroot(b, sokol_dep, sokol_clib, opts.emsdk_expect)) |sysroot| {
+            gfx_mod.addSystemIncludePath(sysroot);
         }
     }
 
@@ -464,6 +526,13 @@ pub fn build(b: *std.Build) void {
         .gamepad_enabled = gamepad_enabled,
         .gamepad_hidapi = gamepad_hidapi,
         .register = true,
+        // Declared here for the same once-per-option reason; only the wasm
+        // graph reads it.
+        .emsdk_expect = b.option(
+            emsdk_source.Expect,
+            "emsdk_expect",
+            "wasm: fail unless emscripten comes from this source (external = a valid EMSDK, package = the emsdk Zig package)",
+        ),
     };
 
     // The PRIMARY graph: built for the requested `-Dtarget`, modules published
@@ -502,6 +571,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(hook_tests).step);
+    // The wasm emsdk decisions (#33) are pure Zig: run them on the host too.
+    for ([_][]const u8{ "emsdk_source.zig", "sokol_emsdk_setup.zig" }) |file| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(file),
+            .target = host_target,
+            .optimize = optimize,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 
     // Run the ASTC container-parsing tests (#341). `gfx/astc.zig` is pure byte
     // parsing with no sokol dependency, so it EXECUTES on the host (magic
