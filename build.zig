@@ -55,15 +55,16 @@ pub const EmLinkOptions = @import("sokol").EmLinkOptions;
 pub const emLinkStep = @import("sokol").emLinkStep;
 
 /// Choose the emsdk for a wasm build (#33), take sokol-zig's emsdk handling
-/// off `sokol_clib` in its favour, and return its sysroot include dir. Null
-/// only while the lazy package emsdk hasn't been fetched yet (the build runner
-/// fetches it and re-runs `build()`).
+/// off `sokol_clib` in its favour, and return its sysroot include dir plus the
+/// package emsdk's pending setup step (see `WasmEmsdk`). Null only while the
+/// lazy package emsdk hasn't been fetched yet (the build runner fetches it and
+/// re-runs `build()`).
 fn emscriptenSysroot(
     b: *std.Build,
     sokol_dep: *std.Build.Dependency,
     sokol_clib: *std.Build.Step.Compile,
     expect: ?emsdk_source.Expect,
-) ?std.Build.LazyPath {
+) ?WasmEmsdk {
     const BuildFs = struct {
         b: *std.Build,
         pub fn exists(self: @This(), path: []const u8) bool {
@@ -95,9 +96,20 @@ fn emscriptenSysroot(
     // takeOver creates the package's setup on sokol_clib, or reuses the one the
     // imgui bridge already attached to this shared artifact (never two
     // installs on one emsdk directory).
-    _ = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, package_emsdk);
-    return sysroot;
+    const taken = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, package_emsdk);
+    return .{ .sysroot = sysroot, .setup = taken.setup };
 }
+
+/// The emsdk a wasm graph compiles against.
+const WasmEmsdk = struct {
+    /// `-isystem` for every C compile (sokol_clib, gfx's stb TUs).
+    sysroot: std.Build.LazyPath,
+    /// The package emsdk's install/activate (null for an external EMSDK or an
+    /// activated package). `sokol_clib` already waits on it; any other compile
+    /// of a module with C sources must too, or it can start before the
+    /// sysroot exists.
+    setup: ?*std.Build.Step,
+};
 
 /// Knobs the backend module graph is parameterised by. `register` is the only
 /// one that is not a user option: the PRIMARY graph publishes its modules under
@@ -124,6 +136,10 @@ const BackendGraph = struct {
     audio_mod: *std.Build.Module,
     window_mod: *std.Build.Module,
     sdl_gp_mod: ?*std.Build.Module,
+    /// wasm only: the package emsdk setup every compile of these modules must
+    /// wait on (see `WasmEmsdk.setup`). A game waits through `sokol_clib`,
+    /// which it links; this package's standalone compile checks don't link it.
+    emsdk_setup: ?*std.Build.Step = null,
 };
 
 /// `b.addModule` (published under `name`) or an anonymous `b.createModule`.
@@ -281,9 +297,11 @@ fn addBackendGraph(
     // different emsdk pin (5.0.x), a second ~1.5 GB download per cold runner,
     // and its sysroot include. `-Demsdk_expect=external|package` fails the
     // configure unless that source was chosen, so CI can assert which ran.
+    var emsdk_setup: ?*std.Build.Step = null;
     if (target.result.os.tag == .emscripten) {
-        if (emscriptenSysroot(b, sokol_dep, sokol_clib, opts.emsdk_expect)) |sysroot| {
-            gfx_mod.addSystemIncludePath(sysroot);
+        if (emscriptenSysroot(b, sokol_dep, sokol_clib, opts.emsdk_expect)) |em| {
+            gfx_mod.addSystemIncludePath(em.sysroot);
+            emsdk_setup = em.setup;
         }
     }
 
@@ -474,6 +492,7 @@ fn addBackendGraph(
         .audio_mod = audio_mod,
         .window_mod = window_mod,
         .sdl_gp_mod = sdl_gp_mod,
+        .emsdk_setup = emsdk_setup,
     };
 }
 
@@ -689,6 +708,15 @@ pub fn build(b: *std.Build) void {
     // so no run artifact is wired (#21).
     const window_compile_check = b.addTest(.{ .root_module = window_mod });
     test_step.dependOn(&window_compile_check.step);
+
+    // wasm (#33): these checks compile gfx's C sources against the package
+    // emsdk's sysroot without linking sokol_clib, so they wait on its setup
+    // explicitly instead of racing it.
+    if (backend.emsdk_setup) |setup| {
+        for ([_]*std.Build.Step.Compile{ audio_compile_check, gfx_compile_check, input_compile_check, window_compile_check }) |check| {
+            check.step.dependOn(setup);
+        }
+    }
 
     // ── `test-host` ──────────────────────────────────────────────────
     //
