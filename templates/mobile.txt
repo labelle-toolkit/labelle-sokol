@@ -83,10 +83,19 @@ export fn cleanup() callconv(.c) void {
 }
 
 // {{entry_comment}}
-// sokol's C runtime provides the OS entry point (ANativeActivity_onCreate on
-// Android, main() on iOS) and calls sokol_main() to configure the app.
-// sokol_main must RETURN sapp_desc — it must NOT call sapp_run() itself.
-// Zig's own pub fn main() is not used for shared-library / UIKit targets.
+// On Android sokol's C runtime provides the entry point
+// (ANativeActivity_onCreate) and calls sokol_main() to configure the app, so
+// sokol_main must RETURN sapp_desc and must NOT call sapp_run() itself.
+// iOS is different: sokol-zig compiles sokol_app with SOKOL_NO_ENTRY on every
+// non-Android target (sokol_defines.h), so there is no C main() there. The iOS
+// exe starts in Zig's `main` below, which runs the same descriptor
+// (labelle-cli#471 I0). Android builds a shared library, so `main` is never
+// referenced there.
+pub fn main() void {
+    var no_args = [_][*:0]u8{};
+    window.runDesc(sokol_main(0, &no_args));
+}
+
 export fn sokol_main(argc: c_int, argv: [*][*:0]u8) window.Desc {
     _ = argc;
     _ = argv;

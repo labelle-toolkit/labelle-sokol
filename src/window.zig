@@ -812,6 +812,13 @@ pub fn makeDesc(desc: struct {
     };
 }
 
+/// Run the sokol application loop from a descriptor built by `makeDesc`. The
+/// iOS exe entry uses it (the mobile template's `main`): sokol_app has no C
+/// main() there (SOKOL_NO_ENTRY), so Zig's main must call sapp_run itself.
+pub fn runDesc(desc: Desc) void {
+    sapp.run(desc);
+}
+
 /// Run the sokol application loop with callbacks. Forwards each field
 /// explicitly because Zig treats `run`'s anon-struct parameter and
 /// `makeDesc`'s anon-struct parameter as distinct types — passing one
