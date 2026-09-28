@@ -260,6 +260,16 @@ fn addBackendGraph(
         // a desktop target.)
         const core_dep = b.dependency("labelle_core", .{ .target = target, .optimize = optimize });
         input_mod.addImport("labelle-core", core_dep.module("labelle-core"));
+    } else if (target.result.os.tag == .ios or target.result.os.tag == .tvos) {
+        // iOS/tvOS GameController bridge: input.zig calls the `labelle_gc_*`
+        // C ABI that labelle-core's `gamepad_source/ios.zig` exports. Those
+        // exports exist only if that file is analyzed, which nothing else
+        // guarantees (e.g. `.gamepad = .none`), so input.zig references it
+        // through this import (labelle-cli#471 I0). The generated build
+        // unifies the app's core onto it, so there is one bridge and one set
+        // of exports.
+        const core_dep = b.dependency("labelle_core", .{ .target = target, .optimize = optimize });
+        input_mod.addImport("labelle-core", core_dep.module("labelle-core"));
     }
 
     // Link SDL2 for the shared desktop gamepad source — DESKTOP targets ONLY,

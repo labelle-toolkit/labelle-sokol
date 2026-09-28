@@ -283,6 +283,14 @@ pub fn libcTxt(
     });
 }
 
+/// iOS libc.txt body: the SDK's `usr/include` as both include dirs and its
+/// `usr/lib` as the crt dir. Caller owns the returned slice.
+fn iosLibcTxt(b: *std.Build, sdk_path: []const u8) ![]u8 {
+    const include_dir = b.pathJoin(&.{ sdk_path, "usr", "include" });
+    const crt_dir = b.pathJoin(&.{ sdk_path, "usr", "lib" });
+    return libcTxt(b.allocator, include_dir, include_dir, crt_dir);
+}
+
 /// Detect the Android NDK sysroot. Mirrors the enum path's `header_android` so the
 /// residual behaves identically — env lookups go through `b.graph.environ_map`, FS
 /// probes through `std.Io.Dir.cwd().access(io, ...)` (Zig 0.16 removed the older
@@ -603,6 +611,21 @@ pub fn post_wire(b: *std.Build, ctx: HookContext) void {
             // Exe SDK library + framework search paths.
             ctx.root_artifact.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr/lib" }) });
             ctx.root_artifact.root_module.addFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "System/Library/Frameworks" }) });
+
+            // libc for EVERY module the exe compiles. Zig ships no iOS libc
+            // headers (`canBuildLibC` is false for *-ios*), so a `link_libc`
+            // module compiled into the exe (sokol's gfx `stb_image_impl.c` and
+            // `@cImport`, labelle-audio's `stb_vorbis.c`, ...) got NO libc
+            // include dirs and failed on `<stdlib.h>`/`<stdio.h>` (#471 I0).
+            // Include paths on `sokol_clib` alone reach only that archive. A
+            // libc file on the compile step covers all its modules, and on a
+            // Darwin target Zig derives the SDK sysroot + framework dir from
+            // `sys_include_dir` (`LibCDirs.detectFromInstallation`), so the
+            // link resolves libSystem from the SDK too. Same shape as the
+            // Android NDK libc.txt above.
+            const libc_content = iosLibcTxt(b, sdk_path) catch @panic("OOM");
+            const ios_libc = b.addWriteFiles().add("ios-libc.txt", libc_content);
+            ctx.root_artifact.setLibCFile(ios_libc);
         },
         .wasm => {
             // Residual (c): the Emscripten emcc link step + install/run wiring

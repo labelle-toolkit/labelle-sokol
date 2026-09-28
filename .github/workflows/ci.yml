@@ -431,3 +431,81 @@ jobs:
             echo "FAIL: sokol's own labelle_android copy reached the .so"; fail=1
           fi
           exit "$fail"
+
+  # RFC labelle-cli#471 I0: keep the sokol iOS path building. sokol is the only
+  # backend that declares iOS, and nothing else in the toolkit builds it. This
+  # job runs the released assembler (pinned + sha256-checked) on a clean macOS
+  # runner against the minimal test/ios fixture, then builds the generated
+  # project for the arm64 simulator and, compile-only, for a device. No
+  # signing, no .app wrapping, no simulator launch (that is labelle-ios, I1).
+  ios-build:
+    name: iOS build (simulator + device, compile-only)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: labelle-sokol
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Show the Xcode toolchain
+        run: |
+          set -euo pipefail
+          xcode-select -p
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-path
+          xcrun --sdk iphoneos --show-sdk-path
+      - name: Fetch the pinned assembler and generate for iOS
+        env:
+          IOS_ASSEMBLER_TAG: v0.117.1
+          # Pinned digest of that release's labelle-assembler-macos-aarch64, so
+          # a moved tag or replaced asset fails here. Update it together with
+          # IOS_ASSEMBLER_TAG (and `.assembler_version` in test/ios).
+          IOS_ASSEMBLER_SHA256: 92ed762c9e11d281eb9a7548ee889d43576a1126c546c871332859e32e4298d9
+        run: |
+          set -euo pipefail
+          base="https://github.com/labelle-toolkit/labelle-assembler/releases/download/$IOS_ASSEMBLER_TAG"
+          mkdir -p "$RUNNER_TEMP/ios-assembler"
+          cd "$RUNNER_TEMP/ios-assembler" || exit 1
+          curl -fsSLO "$base/labelle-assembler-macos-aarch64"
+          echo "$IOS_ASSEMBLER_SHA256  labelle-assembler-macos-aarch64" | shasum -a 256 -c -
+          chmod +x labelle-assembler-macos-aarch64
+          asm="$PWD/labelle-assembler-macos-aarch64"
+
+          cd "$GITHUB_WORKSPACE/labelle-sokol/test/ios" || exit 1
+          "$asm" install --project-root .
+          "$asm" generate --project-root . --platform ios 2>&1 | tee "$RUNNER_TEMP/ios-generate.log"
+          if grep -q 'could not link dep' "$RUNNER_TEMP/ios-generate.log"; then
+            echo "FAIL: generate could not link a package that install should have fetched"; exit 1
+          fi
+          test -f .labelle/sokol_ios/build.zig
+      - name: Build for the arm64 simulator
+        run: |
+          set -euo pipefail
+          cd labelle-sokol/test/ios/.labelle/sokol_ios || exit 1
+          zig build -Doptimize=ReleaseFast
+          exe=zig-out/bin/game
+          test -f "$exe" || { echo "FAIL: $exe not built"; ls -R zig-out || true; exit 1; }
+          file "$exe"
+          file "$exe" | grep -q 'Mach-O 64-bit executable arm64' || { echo "FAIL: not an arm64 Mach-O"; exit 1; }
+          # The simulator platform, not macOS or a device (LC_BUILD_VERSION).
+          otool -l "$exe" > "$RUNNER_TEMP/ios-sim-loadcmds.txt"
+          grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-sim-loadcmds.txt"
+          grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-sim-loadcmds.txt" | grep -Eq 'platform (7|IOSSIMULATOR)' \
+            || { echo "FAIL: not built for the iOS simulator"; exit 1; }
+      - name: Build for a device (compile-only, unsigned)
+        run: |
+          set -euo pipefail
+          cd labelle-sokol/test/ios/.labelle/sokol_ios || exit 1
+          rm -rf zig-out
+          zig build -Doptimize=ReleaseFast -Ddevice=true
+          exe=zig-out/bin/game
+          test -f "$exe" || { echo "FAIL: $exe not built"; ls -R zig-out || true; exit 1; }
+          file "$exe"
+          file "$exe" | grep -q 'Mach-O 64-bit executable arm64' || { echo "FAIL: not an arm64 Mach-O"; exit 1; }
+          otool -l "$exe" > "$RUNNER_TEMP/ios-dev-loadcmds.txt"
+          grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-dev-loadcmds.txt"
+          grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-dev-loadcmds.txt" | grep -Eq 'platform (2|IOS)$' \
+            || { echo "FAIL: not built for an iOS device"; exit 1; }
