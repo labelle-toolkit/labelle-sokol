@@ -93,6 +93,15 @@ export fn cleanup() callconv(.c) void {
 // `sokol_main` is exported on Android only (exporting it on iOS is a duplicate
 // symbol with the stub). labelle-cli#471 I0. Android builds a shared library,
 // so `main` is never referenced there.
+// Zig 0.16's default Mach-O `std.debug.SelfInfo` calls
+// `_dyld_get_image_header_containing_address`, which the iOS SDK does not
+// export, so any panic/stack-trace path fails to LINK on iOS. `void` opts out
+// of self-debug-info there (traces print without symbols); other targets keep
+// the default (`root.debug` has no `SelfInfo`).
+pub const debug = if (@import("builtin").target.os.tag == .ios) struct {
+    pub const SelfInfo = void;
+} else struct {};
+
 comptime {
     if (@import("builtin").target.os.tag != .ios) {
         @export(&sokolMain, .{ .name = "sokol_main" });

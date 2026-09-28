@@ -117,8 +117,13 @@
         },
         .ios = .{
             .entry = "templates/mobile.txt",
+            // `.preview = .none`: the editor preview (telemetry socket +
+            // framebuffer readback) is a desktop/Android dev loop with no iOS
+            // consumer, and its engine socket shim links glibc's
+            // `__errno_location` on every non-macOS, non-Android target, which
+            // iOS lacks (labelle-cli#471 I0).
             .loop_style = .callback,
-            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .sokol_readback },
+            .lifecycle = .{ .runner_module_var = true, .cleanup_callback = true, .allocator_holes = true, .gui_events = true, .imgui_dispatch = true, .preview = .none },
             .target = .resolved,
             .link_libc = true,
             .artifacts = .{.{ .name = "sokol_clib" }},

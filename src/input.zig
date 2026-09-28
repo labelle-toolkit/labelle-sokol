@@ -29,6 +29,15 @@ const sapp = sokol.app;
 // linked by the generated build.zig — so the link resolves on-device.
 const gc_enabled = builtin.target.os.tag == .ios or builtin.target.os.tag == .tvos;
 
+// Pull labelle-core's iOS gamepad source into the build so its `labelle_gc_*`
+// exports exist whenever the externs below are referenced; without this a
+// project that never touches core's gamepad source (`.gamepad = .none`)
+// failed to link with undefined `_labelle_gc_*` (labelle-cli#471 I0). The
+// build adds the `labelle-core` import on ios/tvos for exactly this.
+comptime {
+    if (gc_enabled) _ = @import("labelle-core").gamepad_source.platform;
+}
+
 const gc = if (gc_enabled) struct {
     extern "c" fn labelle_gc_button_down(slot: u32, button: u32) bool;
     extern "c" fn labelle_gc_axis_value(slot: u32, axis: u32) f32;
