@@ -509,3 +509,163 @@ jobs:
           grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-dev-loadcmds.txt"
           grep -A4 LC_BUILD_VERSION "$RUNNER_TEMP/ios-dev-loadcmds.txt" | grep -Eq 'platform (2|IOS)$' \
             || { echo "FAIL: not built for an iOS device"; exit 1; }
+
+  # labelle-sokol#33: a valid EMSDK (labelle-web 0.3 exports EMSDK, EM_CONFIG
+  # and PATH) is honoured, and sokol-zig's OWN emsdk package (a different
+  # pin) is never installed. Before #33, sokol_clib ran sokol-zig's
+  # `emsdk install/activate latest` anyway: a second ~1.5 GB download per
+  # cold runner. Asserts the MECHANISM, not only a green build:
+  #   1. `-Demsdk_expect` gates both ways (EMSDK unset refuses `external`,
+  #      a valid EMSDK refuses `package`);
+  #   2. no emsdk setup ran: no "(zig-pkg emsdk)" step and no sokol-zig
+  #      `run bash` step;
+  #   3. no emsdk package under zig-pkg/ has `upstream/` or `.emscripten`, and
+  #      sokol-zig's (always fetched) was among those checked;
+  #   4. sokol_gfx.c compiled against ONLY EMSDK's sysroot (--verbose-cc).
+  wasm-external-emsdk:
+    name: wasm sokol_clib with an external EMSDK (no zig-pkg emsdk install)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXT_EMSDK_VERSION: 4.0.9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      # Configure-only (`--help` runs build() but no steps).
+      - name: EMSDK unset refuses expect=external
+        env:
+          EMSDK: ''
+        run: |
+          set -uo pipefail
+          if zig build -Dtarget=wasm32-emscripten -Demsdk_expect=external --help > gate.log 2>&1; then
+            echo "FAIL: -Demsdk_expect=external passed with EMSDK unset"; exit 1
+          fi
+          grep -F "the emsdk Zig package was chosen" gate.log \
+            || { cat gate.log; echo "FAIL: expect=external failed for another reason"; exit 1; }
+      - name: Cache the external emsdk
+        id: ext-emsdk-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/ext-emsdk
+          key: ext-emsdk-${{ runner.os }}-${{ env.EXT_EMSDK_VERSION }}
+      - name: Install the external emsdk
+        if: steps.ext-emsdk-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$EXT_EMSDK_VERSION" https://github.com/emscripten-core/emsdk ~/ext-emsdk
+          cd ~/ext-emsdk
+          ./emsdk install "$EXT_EMSDK_VERSION"
+          ./emsdk activate "$EXT_EMSDK_VERSION"
+      - name: Export EMSDK, EM_CONFIG and PATH
+        run: |
+          set -euo pipefail
+          root="$HOME/ext-emsdk"
+          test -d "$root/upstream/emscripten"
+          test -f "$root/.emscripten"
+          echo "EMSDK=$root" >> "$GITHUB_ENV"
+          echo "EM_CONFIG=$root/.emscripten" >> "$GITHUB_ENV"
+          echo "$root/upstream/emscripten" >> "$GITHUB_PATH"
+      - name: A valid EMSDK refuses expect=package
+        run: |
+          set -uo pipefail
+          if zig build -Dtarget=wasm32-emscripten -Demsdk_expect=package --help > gate.log 2>&1; then
+            echo "FAIL: -Demsdk_expect=package passed with a valid EMSDK set"; exit 1
+          fi
+          grep -F "a valid EMSDK was found and used" gate.log \
+            || { cat gate.log; echo "FAIL: expect=package failed for another reason"; exit 1; }
+      # A fresh cache dir so the C compiles really run and --verbose-cc prints them.
+      - name: Build sokol_clib for wasm from the external EMSDK
+        run: |
+          set -uo pipefail
+          zig build -Dtarget=wasm32-emscripten -Demsdk_expect=external \
+            --cache-dir "$RUNNER_TEMP/cc-cache" --verbose-cc --summary all > build.log 2>&1
+          status=$?
+          grep -v -- " -isystem " build.log | tail -40
+          [ "$status" -eq 0 ] || { tail -80 build.log; echo "FAIL: build exited $status"; exit 1; }
+          [ -s zig-out/lib/libsokol_clib.a ] || { echo "FAIL: no sokol_clib archive"; exit 1; }
+      - name: Assert no emsdk setup ran and only EMSDK's sysroot was used
+        run: |
+          set -euo pipefail
+          if grep -E "\(zig-pkg emsdk\)|run bash" build.log; then
+            echo "FAIL: an emsdk install/activate step ran"; exit 1
+          fi
+          fail=0
+          seen=0
+          shopt -s nullglob
+          for dir in zig-pkg/*/; do
+            [ -f "$dir/emsdk.py" ] || continue
+            seen=$((seen + 1))
+            echo "emsdk package present (fetched, not necessarily used): $dir"
+            for marker in upstream .emscripten; do
+              if [ -e "$dir$marker" ]; then
+                echo "FAIL: $dir$marker exists: the package emsdk was installed/activated"
+                fail=1
+              fi
+            done
+          done
+          [ "$seen" -gt 0 ] || { echo "FAIL: sokol-zig's emsdk package not found under zig-pkg/, so the check proved nothing"; fail=1; }
+          python3 tools/check_cc_sysroot.py build.log "$EMSDK/upstream/emscripten/cache/sysroot/include" sokol_gfx.c || fail=1
+          exit $fail
+
+  # labelle-sokol#33, no EMSDK: sokol_clib must use THIS package's emsdk (the
+  # same pin as the game's root emsdk, which it links with), install/activate
+  # it itself when needed, and never install sokol-zig's different emsdk pin.
+  wasm-package-emsdk:
+    name: wasm sokol_clib from the package emsdk (never sokol-zig's)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+      - name: Cache zig-pkg (the package emsdk install)
+        uses: actions/cache@v4
+        with:
+          path: zig-pkg
+          key: sokol-wasm-zigpkg-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+      - name: Build sokol_clib for wasm from the package emsdk
+        env:
+          EMSDK: ''
+        run: |
+          set -uo pipefail
+          zig build -Dtarget=wasm32-emscripten -Demsdk_expect=package \
+            --cache-dir "$RUNNER_TEMP/cc-cache" --verbose-cc --summary all > build.log 2>&1
+          status=$?
+          grep -v -- " -isystem " build.log | tail -40
+          [ "$status" -eq 0 ] || { tail -80 build.log; echo "FAIL: build exited $status"; exit 1; }
+      - name: Only the package emsdk was installed, and it provides the sysroot
+        run: |
+          set -euo pipefail
+          if grep -F "run bash" build.log; then
+            echo "FAIL: sokol-zig's own emsdk setup ran"; exit 1
+          fi
+          own_hash=$(python3 -c "import re;t=open('build.zig.zon').read();print(re.search(r'\.emsdk\s*=\s*\.\{.*?\.hash\s*=\s*\"([^\"]+)\"',t,re.S).group(1))")
+          own="zig-pkg/$own_hash"
+          echo "package emsdk: $own"
+          [ -d "$own/upstream/emscripten" ] || { echo "FAIL: the package emsdk was not installed"; exit 1; }
+          [ -f "$own/.emscripten" ] || { echo "FAIL: the package emsdk was not activated"; exit 1; }
+          fail=0
+          seen=0
+          shopt -s nullglob
+          for dir in zig-pkg/*/; do
+            [ -f "$dir/emsdk.py" ] || continue
+            [ "${dir%/}" = "$own" ] && continue
+            seen=$((seen + 1))
+            echo "other emsdk package (sokol-zig's): $dir"
+            for marker in upstream .emscripten; do
+              if [ -e "$dir$marker" ]; then
+                echo "FAIL: $dir$marker exists: sokol-zig's emsdk was installed/activated"
+                fail=1
+              fi
+            done
+          done
+          [ "$seen" -gt 0 ] || { echo "FAIL: sokol-zig's emsdk package not found, so the check proved nothing"; fail=1; }
+          python3 tools/check_cc_sysroot.py build.log "$own/upstream/emscripten/cache/sysroot/include" sokol_gfx.c || fail=1
+          exit $fail

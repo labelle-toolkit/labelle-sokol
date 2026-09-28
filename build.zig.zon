@@ -124,6 +124,9 @@
         "backend.manifest.zon",
         "backend.manifest.v2.zon",
         "backend.hook.zig",
+        // Imported by build.zig for the wasm emsdk choice (#33).
+        "emsdk_source.zig",
+        "sokol_emsdk_setup.zig",
         "build_fragments",
         "templates",
         "src",

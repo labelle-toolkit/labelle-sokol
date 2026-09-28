@@ -1,5 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
+// Which emsdk a wasm build uses: a valid EMSDK, or this package's emsdk (#33).
+const emsdk_source = @import("emsdk_source.zig");
+// Takes sokol-zig's own emsdk setup + sysroot off sokol_clib (#33). Identical
+// to labelle-imgui's bridges/sokol copy: both build the same sokol_clib.
+const sokol_emsdk_setup = @import("sokol_emsdk_setup.zig");
 
 /// True when `t` is a native desktop OS (matches the shared SDL source's
 /// comptime `is_desktop`): only there are the SDL `extern`s referenced and SDL
@@ -49,6 +54,63 @@ fn dirExists(path: []const u8) bool {
 pub const EmLinkOptions = @import("sokol").EmLinkOptions;
 pub const emLinkStep = @import("sokol").emLinkStep;
 
+/// Choose the emsdk for a wasm build (#33), take sokol-zig's emsdk handling
+/// off `sokol_clib` in its favour, and return its sysroot include dir plus the
+/// package emsdk's pending setup step (see `WasmEmsdk`). Null only while the
+/// lazy package emsdk hasn't been fetched yet (the build runner fetches it and
+/// re-runs `build()`).
+fn emscriptenSysroot(
+    b: *std.Build,
+    sokol_dep: *std.Build.Dependency,
+    sokol_clib: *std.Build.Step.Compile,
+    expect: ?emsdk_source.Expect,
+) ?WasmEmsdk {
+    const BuildFs = struct {
+        b: *std.Build,
+        pub fn exists(self: @This(), path: []const u8) bool {
+            std.Io.Dir.cwd().access(self.b.graph.io, path, .{}) catch |err| switch (err) {
+                error.FileNotFound => return false,
+                // Anything else (permissions, I/O) is not "missing": report it
+                // rather than silently falling back to installing the package.
+                else => std.debug.panic("emsdk: cannot check path '{s}': {s}", .{ path, @errorName(err) }),
+            };
+            return true;
+        }
+    };
+    const source = emsdk_source.resolve(b.allocator, b.graph.environ_map.get("EMSDK"), .{
+        .emcc_name = if (builtin.os.tag == .windows) "emcc.bat" else "emcc",
+    }, BuildFs{ .b = b });
+    if (emsdk_source.mismatch(source, expect)) |msg| std.debug.panic("emsdk: {s}", .{msg});
+    var sysroot: std.Build.LazyPath = undefined;
+    var package_emsdk: ?*std.Build.Dependency = null;
+    switch (source) {
+        .external => |root| sysroot = .{
+            .cwd_relative = emsdk_source.sysrootInclude(b.allocator, root) catch @panic("OOM"),
+        },
+        .package => {
+            const emsdk_dep = b.lazyDependency("emsdk", .{}) orelse return null;
+            sysroot = emsdk_dep.path("upstream/emscripten/cache/sysroot/include");
+            package_emsdk = emsdk_dep;
+        },
+    }
+    // takeOver creates the package's setup on sokol_clib, or reuses the one the
+    // imgui bridge already attached to this shared artifact (never two
+    // installs on one emsdk directory).
+    const taken = sokol_emsdk_setup.takeOver(b, sokol_dep, sokol_clib, sysroot, package_emsdk);
+    return .{ .sysroot = sysroot, .setup = taken.setup };
+}
+
+/// The emsdk a wasm graph compiles against.
+const WasmEmsdk = struct {
+    /// `-isystem` for every C compile (sokol_clib, gfx's stb TUs).
+    sysroot: std.Build.LazyPath,
+    /// The package emsdk's install/activate (null for an external EMSDK or an
+    /// activated package). `sokol_clib` already waits on it; any other compile
+    /// of a module with C sources must too, or it can start before the
+    /// sysroot exists.
+    setup: ?*std.Build.Step,
+};
+
 /// Knobs the backend module graph is parameterised by. `register` is the only
 /// one that is not a user option: the PRIMARY graph publishes its modules under
 /// their public names (consumers do `dep.module("gfx")`), while the extra
@@ -60,6 +122,8 @@ const BackendOptions = struct {
     gamepad_enabled: bool,
     gamepad_hidapi: bool,
     register: bool,
+    /// `-Demsdk_expect` (wasm only): fail unless this emsdk source was chosen.
+    emsdk_expect: ?emsdk_source.Expect = null,
 };
 
 /// Everything `build()` needs back out of `addBackendGraph`.
@@ -72,6 +136,10 @@ const BackendGraph = struct {
     audio_mod: *std.Build.Module,
     window_mod: *std.Build.Module,
     sdl_gp_mod: ?*std.Build.Module,
+    /// wasm only: the package emsdk setup every compile of these modules must
+    /// wait on (see `WasmEmsdk.setup`). A game waits through `sokol_clib`,
+    /// which it links; this package's standalone compile checks don't link it.
+    emsdk_setup: ?*std.Build.Step = null,
 };
 
 /// `b.addModule` (published under `name`) or an anonymous `b.createModule`.
@@ -216,9 +284,24 @@ fn addBackendGraph(
     // setting it after the addCSourceFile calls caused emcc to bail
     // with `'stdio.h' file not found`. Mirrors sokol-zig's pattern
     // in `mod_sokol_clib`'s setup.
+    //
+    // ONE emsdk provides the headers for sokol_clib and gfx, and it is the
+    // one the game links with (labelle-sokol#33, see emsdk_source.zig):
+    //   - a valid `EMSDK` (labelle-web 0.3 exports EMSDK, EM_CONFIG and PATH
+    //     in that shape; backend.hook.zig's emcc prefers it too), whose
+    //     sysroot is used as is, and this package's emsdk is not fetched; or
+    //   - this package's `emsdk` (pinned like the game's root emsdk), with its
+    //     own install/activate when it isn't activated yet.
+    // Either way sokol-zig's OWN emsdk handling is taken off sokol_clib
+    // (`sokol_emsdk_setup.takeOver`): its install/activate on sokol-zig's
+    // different emsdk pin (5.0.x), a second ~1.5 GB download per cold runner,
+    // and its sysroot include. `-Demsdk_expect=external|package` fails the
+    // configure unless that source was chosen, so CI can assert which ran.
+    var emsdk_setup: ?*std.Build.Step = null;
     if (target.result.os.tag == .emscripten) {
-        if (b.lazyDependency("emsdk", .{})) |emsdk_dep| {
-            gfx_mod.addSystemIncludePath(emsdk_dep.path("upstream/emscripten/cache/sysroot/include"));
+        if (emscriptenSysroot(b, sokol_dep, sokol_clib, opts.emsdk_expect)) |em| {
+            gfx_mod.addSystemIncludePath(em.sysroot);
+            emsdk_setup = em.setup;
         }
     }
 
@@ -409,6 +492,7 @@ fn addBackendGraph(
         .audio_mod = audio_mod,
         .window_mod = window_mod,
         .sdl_gp_mod = sdl_gp_mod,
+        .emsdk_setup = emsdk_setup,
     };
 }
 
@@ -464,6 +548,13 @@ pub fn build(b: *std.Build) void {
         .gamepad_enabled = gamepad_enabled,
         .gamepad_hidapi = gamepad_hidapi,
         .register = true,
+        // Declared here for the same once-per-option reason; only the wasm
+        // graph reads it.
+        .emsdk_expect = b.option(
+            emsdk_source.Expect,
+            "emsdk_expect",
+            "wasm: fail unless emscripten comes from this source (external = a valid EMSDK, package = the emsdk Zig package)",
+        ),
     };
 
     // The PRIMARY graph: built for the requested `-Dtarget`, modules published
@@ -502,6 +593,15 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(hook_tests).step);
+    // The wasm emsdk decisions (#33) are pure Zig: run them on the host too.
+    for ([_][]const u8{ "emsdk_source.zig", "sokol_emsdk_setup.zig" }) |file| {
+        const t = b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path(file),
+            .target = host_target,
+            .optimize = optimize,
+        }) });
+        test_step.dependOn(&b.addRunArtifact(t).step);
+    }
 
     // Run the ASTC container-parsing tests (#341). `gfx/astc.zig` is pure byte
     // parsing with no sokol dependency, so it EXECUTES on the host (magic
@@ -608,6 +708,15 @@ pub fn build(b: *std.Build) void {
     // so no run artifact is wired (#21).
     const window_compile_check = b.addTest(.{ .root_module = window_mod });
     test_step.dependOn(&window_compile_check.step);
+
+    // wasm (#33): these checks compile gfx's C sources against the package
+    // emsdk's sysroot without linking sokol_clib, so they wait on its setup
+    // explicitly instead of racing it.
+    if (backend.emsdk_setup) |setup| {
+        for ([_]*std.Build.Step.Compile{ audio_compile_check, gfx_compile_check, input_compile_check, window_compile_check }) |check| {
+            check.step.dependOn(setup);
+        }
+    }
 
     // ── `test-host` ──────────────────────────────────────────────────
     //
