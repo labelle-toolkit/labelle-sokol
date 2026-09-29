@@ -1,4 +1,6 @@
 const std = @import("std");
+// SDL2 link + the one-line "SDL2 not found" failure (labelle-cli#471 S2).
+const sdl2_link = @import("sdl2_link.zig");
 const builtin = @import("builtin");
 
 /// True when `t` is a native desktop OS (matches the shared SDL source's
@@ -289,12 +291,9 @@ fn addBackendGraph(
         // (`windows-gnu`) toolchain, so honor `LABELLE_SDL2_LIB` — the dir
         // holding the import lib (`libSDL2.dll.a`) from the SDL2 MinGW devel
         // package. `SDL2.dll` must be on PATH (or beside the exe) at runtime.
-        if (target.result.os.tag == .windows and builtin.target.os.tag == .windows) {
-            if (b.graph.environ_map.get("LABELLE_SDL2_LIB")) |p| {
-                input_mod.addLibraryPath(.{ .cwd_relative = p });
-            }
-        }
-        input_mod.linkSystemLibrary("SDL2", .{});
+        // When SDL2 is missing there, the build fails with one line
+        // (`sdl2_link.missing_message`) instead of a linker error (cli#471 S2).
+        sdl2_link.link(b, input_mod, .{ .honor_env = sdl2HonorEnv(target) });
     } else if (gamepad_enabled and targetUsesCoreGamepad(target.result)) {
         // Linux core route: no SDL, but core's udev source dlopens libudev at
         // runtime via std.DynLib, which needs real dlopen — link libc.
@@ -609,6 +608,16 @@ pub fn build(b: *std.Build) void {
     const window_compile_check = b.addTest(.{ .root_module = window_mod });
     test_step.dependOn(&window_compile_check.step);
 
+    // SDL2 resolution + the one-line missing-SDL2 message (cli#471 S2);
+    // `sdl2-link-check` drives the real wiring (CI can force the missing case).
+    const sdl2_link_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("sdl2_link.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    test_step.dependOn(&b.addRunArtifact(sdl2_link_tests).step);
+    sdl2_link.addCheckStep(b, target, sdl_gp_mod != null, .{ .honor_env = sdl2HonorEnv(target) });
+
     // ── `test-host` ──────────────────────────────────────────────────
     //
     // Historical alias, kept so existing invocations and docs keep working.
@@ -753,4 +762,10 @@ pub fn build(b: *std.Build) void {
             int_bless_step.dependOn(&int_bless.step);
         }
     }
+}
+
+/// sokol honours `LABELLE_SDL2_LIB` only for a Windows target built on a
+/// Windows host (its rule before cli#471 S2, kept as is).
+fn sdl2HonorEnv(target: std.Build.ResolvedTarget) bool {
+    return target.result.os.tag == .windows and builtin.target.os.tag == .windows;
 }

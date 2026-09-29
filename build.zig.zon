@@ -127,5 +127,6 @@
         "build_fragments",
         "templates",
         "src",
+        "sdl2_link.zig",
     },
 }
